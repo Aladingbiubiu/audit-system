@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Environment
+.env
+.venv/
+venv/
+
+# Runtime data
+uploads/
+data/audit.db
+
+# Local editor / OS
+.DS_Store
+Thumbs.db
