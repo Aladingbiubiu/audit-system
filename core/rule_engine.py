@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass, field
 
 from .auditor import AuditIssue
+from .rule_model import DocumentFacts, GroupProfile, PolicySelector, Rule, RuleMetadata, RuleRunner
 
 
 @dataclass
@@ -32,6 +33,16 @@ class DeterministicResult:
 class DeterministicRuleEngine:
     def evaluate(self, page_texts: list[tuple[int, str]]) -> DeterministicResult:
         result = DeterministicResult()
+        facts = self._extract_document_facts(page_texts)
+        policy = PolicySelector.select(facts.profile)
+
+        result.facts.update(self._format_facts_for_prompt(facts))
+        result.notes.extend(policy.notes)
+        result.notes.extend(self._build_policy_notes(facts))
+        result.issues.extend(RuleRunner(self._build_rules()).run(facts, policy))
+        return result
+
+    def _extract_document_facts(self, page_texts: list[tuple[int, str]]) -> DocumentFacts:
         full_text = "\n".join(text for _, text in page_texts)
         pre_invitation_text = "\n".join(
             text for _, text in page_texts if not self._is_invitation_page(text)
@@ -68,72 +79,160 @@ class DeterministicRuleEngine:
             and any(mode in academic_modes for mode in ["学术交流", "校际交流"])
         )
 
-        result.facts.update({
-            "企业团组": "是" if is_enterprise else "否",
-            "高校科研院所团组": "是" if is_academic else "否",
-            "任务类型": "、".join(academic_modes) if academic_modes else "未识别",
-            "已识别人员名单": "是" if has_personnel_list else "否",
-            "已识别公示情况": "是" if has_public_notice else "否",
-            "已识别翻译情况": "是" if has_translation_info else "否",
-            "已识别交通班次信息": "是" if transport_refs else "否",
-            "已提取停留天数": self._format_duration_facts(duration_values),
-            "已提取邀请单位": self._format_invite_unit_facts(invite_units),
-            "已识别委派来源": dispatch_source or "未识别",
-            "已识别委派材料": dispatch_material or "未识别",
-            "已识别经费列支": expense_source or "未识别",
-            "已识别学术交流团组标注": "是" if has_academic_group_marker else "否",
-        })
-
         if is_enterprise:
-            result.notes.append(
+            group_type = "enterprise"
+        elif is_academic:
+            group_type = "academic"
+        else:
+            group_type = "government"
+
+        profile = GroupProfile(
+            group_type=group_type,
+            academic_modes=academic_modes,
+            is_enterprise=is_enterprise,
+            is_academic=is_academic,
+            is_long_term_visiting=is_long_term_visiting,
+            is_academic_exchange_group=is_academic_exchange_group,
+        )
+
+        return DocumentFacts(
+            page_texts=page_texts,
+            full_text=full_text,
+            pre_invitation_text=pre_invitation_text,
+            profile=profile,
+            has_personnel_list=has_personnel_list,
+            has_public_notice=has_public_notice,
+            has_translation_info=has_translation_info,
+            transport_refs=transport_refs,
+            duration_values=duration_values,
+            invite_units=invite_units,
+            dispatch_source=dispatch_source,
+            dispatch_material=dispatch_material,
+            expense_source=expense_source,
+            has_academic_group_marker=has_academic_group_marker,
+        )
+
+    def _format_facts_for_prompt(self, facts: DocumentFacts) -> dict[str, object]:
+        return {
+            "企业团组": "是" if facts.profile.is_enterprise else "否",
+            "高校科研院所团组": "是" if facts.profile.is_academic else "否",
+            "任务类型": "、".join(facts.profile.academic_modes) if facts.profile.academic_modes else "未识别",
+            "已识别人员名单": "是" if facts.has_personnel_list else "否",
+            "已识别公示情况": "是" if facts.has_public_notice else "否",
+            "已识别翻译情况": "是" if facts.has_translation_info else "否",
+            "已识别交通班次信息": "是" if facts.transport_refs else "否",
+            "已提取停留天数": self._format_duration_facts(facts.duration_values),
+            "已提取邀请单位": self._format_invite_unit_facts(facts.invite_units),
+            "已识别委派来源": facts.dispatch_source or "未识别",
+            "已识别委派材料": facts.dispatch_material or "未识别",
+            "已识别经费列支": facts.expense_source or "未识别",
+            "已识别学术交流团组标注": "是" if facts.has_academic_group_marker else "否",
+        }
+
+    def _build_policy_notes(self, facts: DocumentFacts) -> list[str]:
+        notes: list[str] = []
+        if facts.profile.is_enterprise:
+            notes.append(
                 "已按企业团组处理；列入计划情况、周末公务情况、翻译情况、是否学术交流团缺失不直接作为问题。"
             )
-        if is_academic:
-            result.notes.append(
+        if facts.profile.is_academic:
+            notes.append(
                 "已按高校、科研院所团组处理；应优先区分访学、学术交流、校际交流，再按对应政策口径审核。"
             )
-        if is_long_term_visiting:
-            result.notes.append(
+        if facts.profile.is_long_term_visiting:
+            notes.append(
                 "已识别为高校、科研院所长期访学团组（通常三个月以上）；如呈报表末尾已写明公示情况，不再机械要求列入计划情况、周末公务情况、翻译情况等表述。"
             )
-        if dispatch_source:
-            result.notes.append(
-                f"已识别委派来源为“{dispatch_source}”；应关注是否附有相关委派材料，并核对呈报表“费用来源开支项目”栏是否与该委派来源一致。"
+        if facts.dispatch_source:
+            notes.append(
+                f"已识别委派来源为“{facts.dispatch_source}”；应关注是否附有相关委派材料，并核对呈报表“费用来源开支项目”栏是否与该委派来源一致。"
             )
-        if dispatch_material:
-            result.notes.append(
-                f"已通过附件第一页标题关键词识别到“{dispatch_material}”类委派材料。"
+        if facts.dispatch_material:
+            notes.append(
+                f"已通过附件第一页标题关键词识别到“{facts.dispatch_material}”类委派材料。"
             )
-        if is_academic_exchange_group:
-            result.notes.append(
+        if facts.profile.is_academic_exchange_group:
+            notes.append(
                 "已识别为高校、科研院所学术交流/校际交流团组；应重点检查呈报表最后一页是否标注类似“此团系学术交流团组”。"
             )
-        if has_personnel_list:
-            result.notes.append("材料已出现“团组人员名单”或名单式内容，不得判为缺少人员名单。")
-        if has_public_notice:
-            result.notes.append("材料已明确写出公示情况，如“已按规定进行公示，公示无异议”。")
-        if has_translation_info:
-            result.notes.append("材料已明确写出翻译情况，如“某某同志担任翻译”。")
-        if transport_refs:
-            result.notes.append("材料中已识别到交通班次信息，不应再误判为缺少航班号或车次。")
+        if facts.has_personnel_list:
+            notes.append("材料已出现“团组人员名单”或名单式内容，不得判为缺少人员名单。")
+        if facts.has_public_notice:
+            notes.append("材料已明确写出公示情况，如“已按规定进行公示，公示无异议”。")
+        if facts.has_translation_info:
+            notes.append("材料已明确写出翻译情况，如“某某同志担任翻译”。")
+        if facts.transport_refs:
+            notes.append("材料中已识别到交通班次信息，不应再误判为缺少航班号或车次。")
+        return notes
 
-        result.issues.extend(self._find_banned_word_issues(page_texts, is_academic=is_academic))
-        result.issues.extend(self._find_duration_consistency_issues(duration_values))
-        result.issues.extend(self._find_invite_unit_consistency_issues(invite_units))
-        result.issues.extend(
-            self._find_academic_group_policy_issues(
-                is_academic=is_academic,
-                academic_modes=academic_modes,
-                is_long_term_visiting=is_long_term_visiting,
-                has_public_notice=has_public_notice,
-                dispatch_source=dispatch_source,
-                dispatch_material=dispatch_material,
-                expense_source=expense_source,
-                has_academic_group_marker=has_academic_group_marker,
-                page_texts=page_texts,
+    def _build_rules(self) -> list[Rule]:
+        all_group_types = ("enterprise", "academic", "government")
+        return [
+            Rule(
+                RuleMetadata(
+                    id="text.banned_words",
+                    name="禁用词审核",
+                    layer="structure",
+                    severity="严重",
+                    applies_to=all_group_types,
+                    requires_facts=("page_texts", "profile"),
+                ),
+                lambda facts: self._find_banned_word_issues(
+                    facts.page_texts,
+                    is_academic=facts.profile.is_academic,
+                ),
+            ),
+            Rule(
+                RuleMetadata(
+                    id="duration.cross_material_consistency",
+                    name="跨材料停留天数一致性",
+                    layer="consistency",
+                    severity="严重",
+                    applies_to=all_group_types,
+                    requires_facts=("duration_values",),
+                ),
+                lambda facts: self._find_duration_consistency_issues(facts.duration_values),
+            ),
+            Rule(
+                RuleMetadata(
+                    id="invite_unit.chinese_name_consistency",
+                    name="邀请单位中文名称一致性",
+                    layer="consistency",
+                    severity="严重",
+                    applies_to=all_group_types,
+                    requires_facts=("invite_units",),
+                ),
+                lambda facts: self._find_invite_unit_consistency_issues(facts.invite_units),
+            ),
+            Rule(
+                RuleMetadata(
+                    id="academic_group.policy_checks",
+                    name="高校科研院所团组策略审核",
+                    layer="strategy",
+                    severity="严重",
+                    applies_to=("academic",),
+                    requires_facts=(
+                        "profile",
+                        "has_public_notice",
+                        "dispatch_source",
+                        "dispatch_material",
+                        "expense_source",
+                        "has_academic_group_marker",
+                    ),
+                ),
+                lambda facts: self._find_academic_group_policy_issues(
+                    is_academic=facts.profile.is_academic,
+                    academic_modes=facts.profile.academic_modes,
+                    is_long_term_visiting=facts.profile.is_long_term_visiting,
+                    has_public_notice=facts.has_public_notice,
+                    dispatch_source=facts.dispatch_source,
+                    dispatch_material=facts.dispatch_material,
+                    expense_source=facts.expense_source,
+                    has_academic_group_marker=facts.has_academic_group_marker,
+                    page_texts=facts.page_texts,
+                ),
             )
-        )
-        return result
+        ]
 
     def filter_llm_issues(
         self,

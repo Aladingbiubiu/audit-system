@@ -20,7 +20,8 @@
 - 关键文件：
   - `app.py`：Streamlit 界面
   - `core/workflow.py`：工作流主入口，先跑规则引擎，再跑 LLM，再合并结果
-  - `core/rule_engine.py`：程序可判定规则
+  - `core/rule_engine.py`：事实提取、规则选择和程序可判定规则入口
+  - `core/rule_model.py`：事实模型、团组画像、规则元数据和规则执行器
   - `core/auditor.py`：LLM 审核、结果解析、摘要清洗
   - `core/pdf_parser.py`：PDF 文本 / OCR 提取
   - `core/database.py`：审核记录、反馈判例存储
@@ -37,6 +38,12 @@
 
 ### 2. 规则引擎优先
 
+- 已新增结构化规则骨架：
+  - `DocumentFacts`：统一承载材料事实
+  - `GroupProfile`：统一描述团组类型和任务类型
+  - `AuditPolicy` / `PolicySelector`：按团组类型显式选择启用的规则 ID
+  - `RuleMetadata` / `Rule`：为规则提供 ID、层级、适用范围和依赖事实
+  - `RuleRunner`：按团组策略执行已启用规则
 - 程序先识别这些事实：
   - 企业团组
   - 人员名单
@@ -46,6 +53,11 @@
   - 跨材料停留天数
   - 邀请单位中文名称
 - 程序可直接生成部分问题，并过滤与程序事实冲突的模型误报。
+- 第一批已接入元数据执行器的规则包括：
+  - 禁用词审核
+  - 跨材料停留天数一致性
+  - 邀请单位中文名称一致性
+  - 高校科研院所团组策略审核
 
 ### 3. 结果后处理
 
@@ -214,6 +226,7 @@
 ### 5. 更多可程序判定规则仍可继续迁出 LLM
 
 - 当前方向正确，后续继续把确定性规则下沉到 `core/rule_engine.py`。
+- 新增确定性规则时，优先通过 `core/rule_model.py` 中的 `RuleMetadata` / `Rule` 接入，并在 `PolicySelector` 对应团组策略中启用规则 ID，而不是继续把判断散落在 `evaluate` 主流程里。
 
 ## 已验证成功的关键案例
 
@@ -235,4 +248,4 @@
 
 1. 用真实材料回放邀请单位中文名称抽取效果，继续小步调参。
 2. 把“交通班次信息”从存在性识别升级为逐段结构化校验。
-3. 继续将更多可程序判定规则迁出 LLM。
+3. 继续将更多可程序判定规则迁入 `RuleMetadata` / `PolicySelector` / `RuleRunner` 结构化执行流程。

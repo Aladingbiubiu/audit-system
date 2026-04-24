@@ -10,12 +10,14 @@
 ## 当前主线
 
 系统已经从“主要靠大模型审核”转成“程序先判确定性规则，再让大模型处理语义理解类问题”。
+当前已开始把规则从散落代码迁入结构化规则骨架：`DocumentFacts` 负责事实层，`GroupProfile` 负责团组画像，`AuditPolicy` / `PolicySelector` 负责团组策略，`RuleMetadata` / `RuleRunner` 负责规则身份和执行。
 
 目前主线目标不是继续堆 prompt，而是：
 
 1. 把更多可程序判定规则迁移到 `core/rule_engine.py`
 2. 持续压低 LLM 误判
 3. 让最终 summary 和 issues 更一致
+4. 逐步减少规则隐形耦合，让新增规则优先进入元数据执行流程
 
 ## 最近已经完成的关键点
 
@@ -29,6 +31,16 @@
   - 邀请单位中文名称初步比对
   - 邀请函中文邀请单位高置信句式抽取、噪声截断和核心名称归一化
   - 跨材料停留天数一致性校验
+- 已新增 `core/rule_model.py`：
+  - `DocumentFacts`：材料事实层
+  - `GroupProfile`：团组类型和任务类型画像
+  - `AuditPolicy` / `PolicySelector`：按团组类型显式选择启用规则 ID
+  - `RuleMetadata` / `Rule` / `RuleRunner`：规则元数据和执行器
+- 第一批已通过规则元数据执行器接入：
+  - 禁用词审核
+  - 跨材料停留天数一致性
+  - 邀请单位中文名称一致性
+  - 高校科研院所团组策略审核
 - 已做问题排序：
   - 严重 -> 一般 -> 提示
   - 同级按类别
@@ -111,12 +123,13 @@
 
 ### P3
 
-- 继续优化 summary 展示文案和分类归纳粒度
+- 继续把其他确定性规则迁入 `RuleMetadata` / `PolicySelector` / `RuleRunner`，减少规则隐形耦合
 
 ## 建议新会话先看的文件
 
 1. [project.md](</d:/My Project/claude test/audit-system/project.md>)
 2. [core/rule_engine.py](</d:/My Project/claude test/audit-system/core/rule_engine.py>)
-3. [core/workflow.py](</d:/My Project/claude test/audit-system/core/workflow.py>)
-4. [core/auditor.py](</d:/My Project/claude test/audit-system/core/auditor.py>)
-5. [config/rules.yaml](</d:/My Project/claude test/audit-system/config/rules.yaml>)
+3. [core/rule_model.py](</d:/My Project/claude test/audit-system/core/rule_model.py>)
+4. [core/workflow.py](</d:/My Project/claude test/audit-system/core/workflow.py>)
+5. [core/auditor.py](</d:/My Project/claude test/audit-system/core/auditor.py>)
+6. [config/rules.yaml](</d:/My Project/claude test/audit-system/config/rules.yaml>)
