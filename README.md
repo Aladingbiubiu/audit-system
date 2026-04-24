@@ -26,6 +26,7 @@ python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 - [app.py](</d:/My Project/claude test/audit-system/app.py>)
 - [core/workflow.py](</d:/My Project/claude test/audit-system/core/workflow.py>)
 - [core/rule_engine.py](</d:/My Project/claude test/audit-system/core/rule_engine.py>)
+- [core/rule_model.py](</d:/My Project/claude test/audit-system/core/rule_model.py>)
 - [core/auditor.py](</d:/My Project/claude test/audit-system/core/auditor.py>)
 - [core/pdf_parser.py](</d:/My Project/claude test/audit-system/core/pdf_parser.py>)
 - [config/rules.yaml](</d:/My Project/claude test/audit-system/config/rules.yaml>)
@@ -33,5 +34,7 @@ python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 ## 当前开发方向
 
 - 继续把可程序判定规则迁移到 `core/rule_engine.py`
+- 新增确定性规则优先挂到 `core/rule_model.py` 的事实模型、规则元数据和团组类型策略上
+- 继续完善 `PresentmentFacts` / `BudgetFacts`，先稳定抽取字段，再做跨表一致性规则
 - 持续压低 LLM 误判
 - 让最终 `summary` 与 `issues` 更一致
