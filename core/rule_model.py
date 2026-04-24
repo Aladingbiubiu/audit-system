@@ -16,12 +16,58 @@ class GroupProfile:
 
 
 @dataclass
+class PresentmentFacts:
+    """呈报表事实模型：基于 PDF/OCR 文本按字段锚点容错解析。"""
+    presentment_type: str = "unknown"
+    page_no: int | None = None
+    group_unit: str | None = None
+    visit_destination: str | None = None
+    transit_destination: str | None = None
+    duration_days: int | None = None
+    invite_unit_cn: str | None = None
+    invite_unit_foreign: str | None = None
+    expense_source: str | None = None
+    visit_reason: str | None = None
+
+
+@dataclass
+class BudgetFacts:
+    """预算审批意见表事实模型：基于 PDF/OCR 文本按字段锚点容错解析。"""
+    page_no: int | None = None
+    unit_name: str | None = None
+    person_name: str | None = None
+    position: str | None = None
+    group_name: str | None = None
+    group_unit: str | None = None
+    leader_level: str | None = None
+    group_size: str | None = None
+    visit_countries: str | None = None
+    duration_days: int | None = None
+    plan_included: str | None = None
+    time_country_compliant: str | None = None
+    route_compliant: str | None = None
+    group_size_compliant: str | None = None
+    annual_budget_included: str | None = None
+    total_cost: str | None = None
+    international_travel_cost: str | None = None
+    accommodation_cost: str | None = None
+    meal_cost: str | None = None
+    miscellaneous_cost: str | None = None
+    other_cost: str | None = None
+    pre_approval_items: str | None = None
+    other_matters: str | None = None
+
+
+@dataclass
 class DocumentFacts:
     """材料事实层：只承载已提取事实，不直接表达违规结论。"""
     page_texts: list[tuple[int, str]]
     full_text: str
     pre_invitation_text: str
     profile: GroupProfile
+    presentment: PresentmentFacts = field(default_factory=PresentmentFacts)
+    budget: BudgetFacts = field(default_factory=BudgetFacts)
+    group_unit_name: str | None = None
     has_personnel_list: bool = False
     has_public_notice: bool = False
     has_translation_info: bool = False

@@ -2,7 +2,16 @@ import re
 from dataclasses import dataclass, field
 
 from .auditor import AuditIssue
-from .rule_model import DocumentFacts, GroupProfile, PolicySelector, Rule, RuleMetadata, RuleRunner
+from .rule_model import (
+    BudgetFacts,
+    DocumentFacts,
+    GroupProfile,
+    PolicySelector,
+    PresentmentFacts,
+    Rule,
+    RuleMetadata,
+    RuleRunner,
+)
 
 
 @dataclass
@@ -48,8 +57,11 @@ class DeterministicRuleEngine:
             text for _, text in page_texts if not self._is_invitation_page(text)
         )
 
-        is_enterprise = self._is_enterprise_group(full_text)
-        is_academic = self._is_academic_group(full_text) and not is_enterprise
+        presentment = self._parse_presentment_facts(page_texts)
+        budget = self._parse_budget_facts(page_texts)
+        group_unit_name = presentment.group_unit
+        is_enterprise = self._is_enterprise_group(group_unit_name or "")
+        is_academic = self._is_academic_group(group_unit_name or "") and not is_enterprise
         academic_modes = self._detect_academic_modes(full_text)
 
         has_personnel_list = self._has_personnel_list(full_text)
@@ -61,11 +73,11 @@ class DeterministicRuleEngine:
             ) or ("翻译" in pre_invitation_text and "担任" in pre_invitation_text)
         )
         transport_refs = self._find_transport_references(page_texts)
-        duration_values = self._extract_duration_values(page_texts)
-        invite_units = self._extract_invite_units(page_texts)
+        duration_values = self._extract_duration_values(page_texts, presentment)
+        invite_units = self._extract_invite_units(page_texts, presentment)
         dispatch_source = self._detect_dispatch_source(full_text)
         dispatch_material = self._detect_dispatch_material(page_texts)
-        expense_source = self._extract_presentment_expense_source(page_texts)
+        expense_source = presentment.expense_source
         has_academic_group_marker = self._has_academic_group_marker(page_texts)
 
         is_long_term_visiting = (
@@ -100,6 +112,9 @@ class DeterministicRuleEngine:
             full_text=full_text,
             pre_invitation_text=pre_invitation_text,
             profile=profile,
+            presentment=presentment,
+            budget=budget,
+            group_unit_name=group_unit_name,
             has_personnel_list=has_personnel_list,
             has_public_notice=has_public_notice,
             has_translation_info=has_translation_info,
@@ -114,6 +129,10 @@ class DeterministicRuleEngine:
 
     def _format_facts_for_prompt(self, facts: DocumentFacts) -> dict[str, object]:
         return {
+            "呈报表类型": self._format_presentment_type(facts.presentment.presentment_type),
+            "已提取组团单位": facts.group_unit_name or "未识别",
+            "已提取出访地": facts.presentment.visit_destination or "未识别",
+            "已提取经停地": facts.presentment.transit_destination or "未识别",
             "企业团组": "是" if facts.profile.is_enterprise else "否",
             "高校科研院所团组": "是" if facts.profile.is_academic else "否",
             "任务类型": "、".join(facts.profile.academic_modes) if facts.profile.academic_modes else "未识别",
@@ -123,6 +142,9 @@ class DeterministicRuleEngine:
             "已识别交通班次信息": "是" if facts.transport_refs else "否",
             "已提取停留天数": self._format_duration_facts(facts.duration_values),
             "已提取邀请单位": self._format_invite_unit_facts(facts.invite_units),
+            "预算表已提取组团单位": facts.budget.group_unit or "未识别",
+            "预算表已提取出访国别": facts.budget.visit_countries or "未识别",
+            "预算表已提取出访天数": f"{facts.budget.duration_days}天" if facts.budget.duration_days is not None else "未识别",
             "已识别委派来源": facts.dispatch_source or "未识别",
             "已识别委派材料": facts.dispatch_material or "未识别",
             "已识别经费列支": facts.expense_source or "未识别",
@@ -288,11 +310,394 @@ class DeterministicRuleEngine:
 
     def _is_enterprise_group(self, text: str) -> bool:
         keywords = ["集团", "公司", "有限公司", "股份公司", "股份有限公司"]
-        return "组团单位" in text and any(keyword in text for keyword in keywords)
+        return any(keyword in text for keyword in keywords)
 
     def _is_academic_group(self, text: str) -> bool:
         keywords = ["大学", "学院", "学校", "研究院", "研究所", "实验室", "科研院所"]
-        return "组团单位" in text and any(keyword in text for keyword in keywords)
+        return any(keyword in text for keyword in keywords)
+
+    def _parse_presentment_facts(self, page_texts: list[tuple[int, str]]) -> PresentmentFacts:
+        for page_no, text in page_texts:
+            if not self._is_presentment_page(text):
+                continue
+
+            presentment_type = self._detect_presentment_type(text)
+            invite_units = self._extract_units_from_presentment(text)
+            duration = self._extract_presentment_duration(text, presentment_type)
+            return PresentmentFacts(
+                presentment_type=presentment_type,
+                page_no=page_no,
+                group_unit=self._extract_group_unit_name_from_text(text),
+                visit_destination=self._extract_single_presentment_field(
+                    text,
+                    "出访地",
+                    stop_markers=["经停地", "停留时间", "在外停留", "邀请单位"],
+                ),
+                transit_destination=self._extract_single_presentment_field(
+                    text,
+                    "经停地",
+                    stop_markers=["停留时间", "在外停留", "邀请单位", "费用来源"],
+                ),
+                duration_days=duration,
+                invite_unit_cn=next(iter(invite_units), None),
+                invite_unit_foreign=self._extract_invite_unit_foreign_from_presentment(text),
+                expense_source=self._extract_expense_source_from_presentment_text(text),
+                visit_reason=self._extract_presentment_visit_reason(text),
+            )
+        return PresentmentFacts()
+
+    def _parse_budget_facts(self, page_texts: list[tuple[int, str]]) -> BudgetFacts:
+        for page_no, text in page_texts:
+            if not self._is_budget_page(text):
+                continue
+
+            group_unit = self._extract_single_budget_field(
+                text,
+                "组团单位",
+                stop_markers=["团长", "团组人数", "出访国别"],
+            )
+            return BudgetFacts(
+                page_no=page_no,
+                unit_name=self._extract_single_budget_field(
+                    text,
+                    "单位名称",
+                    stop_markers=["姓名", "姓  名", "职务", "职  务"],
+                ) or group_unit,
+                person_name=self._extract_single_budget_field(
+                    text,
+                    "姓名",
+                    stop_markers=["职务", "职  务", "团组名称"],
+                ),
+                position=self._extract_single_budget_field(
+                    text,
+                    "职务",
+                    stop_markers=["团组名称", "组团单位"],
+                ),
+                group_name=self._extract_single_budget_field(
+                    text,
+                    "团组名称",
+                    stop_markers=["组团单位", "团长", "团组人数"],
+                ),
+                group_unit=group_unit,
+                leader_level=self._extract_budget_leader_level(text),
+                group_size=self._extract_single_budget_field(
+                    text,
+                    "团组人数",
+                    stop_markers=["出访国别", "出访时间"],
+                ),
+                visit_countries=self._extract_budget_visit_countries(text),
+                duration_days=self._extract_budget_duration_days(text),
+                plan_included=self._extract_budget_yes_no_field(text, "是否列入出国计划"),
+                time_country_compliant=self._extract_budget_yes_no_field(text, "时间和国别"),
+                route_compliant=self._extract_budget_yes_no_field(text, "路线是否符合规定"),
+                group_size_compliant=self._extract_budget_yes_no_field(text, "团组人数是否符合规定"),
+                annual_budget_included=self._extract_budget_yes_no_field(text, "是否列入年度预算"),
+                # 费用金额在 PDF/OCR 中常被横向表格拆散，暂不做自动金额抽取。
+                total_cost=None,
+                international_travel_cost=None,
+                accommodation_cost=None,
+                meal_cost=None,
+                miscellaneous_cost=None,
+                other_cost=None,
+                pre_approval_items=self._extract_single_budget_field(
+                    text,
+                    "须事先报批的支出事项",
+                    stop_markers=["其他事项", "审核意见"],
+                ),
+                other_matters=self._extract_single_budget_field(
+                    text,
+                    "其他事项",
+                    stop_markers=["审核意见", "单位外事部门意见", "单位财务部门意见"],
+                ),
+            )
+        return BudgetFacts()
+
+    @staticmethod
+    def _is_budget_page(text: str) -> bool:
+        markers = ["预算审批意见表", "任务和预算审批意见表", "审核内容", "国际旅费", "单位财务部门意见"]
+        return sum(1 for marker in markers if marker in text) >= 2
+
+    def _extract_single_budget_field(
+        self,
+        text: str,
+        label: str,
+        *,
+        stop_markers: list[str],
+    ) -> str | None:
+        values = self._extract_field_values_after_label(
+            text,
+            label,
+            stop_markers=stop_markers,
+            max_lines=6,
+        )
+        for value in values:
+            cleaned = self._clean_budget_field_value(value)
+            if cleaned:
+                return cleaned
+        return None
+
+    @staticmethod
+    def _clean_budget_field_value(text: str) -> str | None:
+        cleaned = (text or "").strip(" ：:，,。；;、 \t\r\n")
+        if not cleaned:
+            return None
+        ignored_values = {
+            "单位名称",
+            "姓名",
+            "姓  名",
+            "职务",
+            "职  务",
+            "团组名称",
+            "组团单位",
+            "团长（级别）",
+            "团组人数",
+            "审核内容",
+        }
+        if cleaned in ignored_values:
+            return None
+        return cleaned
+
+    def _extract_budget_visit_countries(self, text: str) -> str | None:
+        value = self._extract_single_budget_field(
+            text,
+            "出访国别",
+            stop_markers=["出访时间", "审核内容", "是否列入出国计划"],
+        )
+        if value and value not in ["（地区）（含经停）", "(地区)(含经停)"]:
+            return value
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            if "出访国别" not in line:
+                continue
+            for candidate in lines[index + 1:index + 5]:
+                cleaned = self._clean_budget_country_value(candidate)
+                if cleaned:
+                    return cleaned
+            for candidate in reversed(lines[max(0, index - 3):index]):
+                cleaned = self._clean_budget_country_value(candidate)
+                if cleaned:
+                    return cleaned
+        return None
+
+    @staticmethod
+    def _clean_budget_country_value(text: str) -> str | None:
+        cleaned = DeterministicRuleEngine._clean_budget_field_value(text)
+        if not cleaned:
+            return None
+        if not DeterministicRuleEngine._has_chinese_text(cleaned):
+            return None
+        invalid_markers = [
+            "大学",
+            "学院",
+            "学校",
+            "单位",
+            "团组",
+            "出访时间",
+            "姓名",
+            "职务",
+            "是否",
+            "符合规定",
+            "审核内容",
+            "预算",
+        ]
+        if any(marker in cleaned for marker in invalid_markers):
+            return None
+        if len(cleaned) > 30:
+            return None
+        return cleaned
+
+    @staticmethod
+    def _extract_budget_duration_days(text: str) -> int | None:
+        patterns = [
+            r"出访时间（天数）\s*(\d+)\s*天?",
+            r"出访时间\(天数\)\s*(\d+)\s*天?",
+            r"出访时间[^\d]{0,20}(\d+)\s*天",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1))
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            if "出访时间" not in line:
+                continue
+            for candidate in lines[index + 1:index + 5]:
+                match = re.fullmatch(r"\d{1,3}", candidate.strip())
+                if match:
+                    return int(match.group(0))
+        return None
+
+    @staticmethod
+    def _extract_budget_leader_level(text: str) -> str | None:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            if "级别" not in line:
+                continue
+            for candidate in lines[index + 1:index + 4]:
+                cleaned = DeterministicRuleEngine._clean_budget_field_value(candidate)
+                if cleaned:
+                    return cleaned
+        return None
+
+    @staticmethod
+    def _extract_budget_yes_no_field(text: str, label: str) -> str | None:
+        pattern = rf"{re.escape(label)}[^：:\n]*[:：]?\s*([是否])"
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+        return None
+
+    @staticmethod
+    def _is_presentment_page(text: str) -> bool:
+        markers = ["呈报表", "出呈字", "出随字", "组团单位", "出访地", "邀请单位"]
+        return sum(1 for marker in markers if marker in text) >= 3
+
+    @staticmethod
+    def _detect_presentment_type(text: str) -> str:
+        if "随团任务呈报表" in text or "出随字" in text or "随 团人员" in text or "随团人员" in text:
+            return "delegation"
+        if "任务呈报表" in text or "出呈字" in text:
+            return "group"
+        return "unknown"
+
+    @staticmethod
+    def _format_presentment_type(presentment_type: str) -> str:
+        mapping = {
+            "group": "组团任务呈报表",
+            "delegation": "随团任务呈报表",
+            "unknown": "未识别",
+        }
+        return mapping.get(presentment_type, presentment_type or "未识别")
+
+    def _extract_single_presentment_field(
+        self,
+        text: str,
+        label: str,
+        *,
+        stop_markers: list[str],
+    ) -> str | None:
+        values = self._extract_field_values_after_label(
+            text,
+            label,
+            stop_markers=stop_markers,
+            max_lines=6,
+        )
+        for value in values:
+            cleaned = self._clean_presentment_field_value(value)
+            if cleaned:
+                return cleaned
+        return None
+
+    @staticmethod
+    def _clean_presentment_field_value(text: str) -> str | None:
+        cleaned = (text or "").strip(" ：:，,。；;、 \t\r\n")
+        if not cleaned:
+            return None
+        ignored_values = {"出访地", "经停地", "停留时间", "在外停留", "邀请单位"}
+        if cleaned in ignored_values:
+            return None
+        if re.fullmatch(r"[\d\s\-—年月日]+", cleaned):
+            return None
+        return cleaned
+
+    @staticmethod
+    def _extract_presentment_duration(text: str, presentment_type: str) -> int | None:
+        patterns = [
+            r"停留时间\s*(\d+)\s*天",
+            r"在外停留\s*(\d+)\s*天",
+        ]
+        if presentment_type == "delegation":
+            patterns.insert(0, r"在外停留\s*[^\d]{0,10}(\d+)\s*天?")
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _extract_invite_unit_foreign_from_presentment(text: str) -> str | None:
+        values = DeterministicRuleEngine._extract_field_values_after_label(
+            text,
+            "邀请单位",
+            stop_markers=["费用来源", "开支项目", "出访地", "经停地", "停留时间"],
+            max_lines=8,
+        )
+        for value in values:
+            if re.search(r"[A-Za-z]{3,}", value):
+                return value.strip(" ：:，,。；;、 \t\r\n")
+        return None
+
+    @staticmethod
+    def _extract_presentment_visit_reason(text: str) -> str | None:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        start_index = None
+        for index, line in enumerate(lines):
+            compact = line.replace(" ", "")
+            if compact in {"出访事由", "出访事由"}:
+                start_index = index + 1
+                break
+            if "出访事由" in compact:
+                start_index = index + 1
+                break
+        if start_index is None:
+            return None
+
+        stop_markers = ["单位公章", "团组人员名单", "附件：", "附件"]
+        values = []
+        for line in lines[start_index:start_index + 12]:
+            if any(marker in line for marker in stop_markers):
+                break
+            cleaned = line.strip(" ：:，,。；;、 \t\r\n")
+            if cleaned:
+                values.append(cleaned)
+        return " ".join(values).strip() or None
+
+    def _extract_group_unit_name(self, page_texts: list[tuple[int, str]]) -> str | None:
+        presentment_pages = [
+            text for _, text in page_texts
+            if "呈报表" in text or "出呈字" in text or "组团单位" in text
+        ]
+        for text in presentment_pages:
+            extracted = self._extract_group_unit_name_from_text(text)
+            if extracted:
+                return extracted
+        return None
+
+    @staticmethod
+    def _extract_group_unit_name_from_text(text: str) -> str | None:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            same_line = re.search(r"组团单位\s*[:：]?\s*(.+)$", line)
+            if same_line:
+                value = same_line.group(1).strip()
+                if value and value != "组团单位":
+                    cleaned = DeterministicRuleEngine._clean_group_unit_name(value)
+                    if cleaned:
+                        return cleaned
+
+            if line != "组团单位":
+                continue
+
+            for next_line in lines[index + 1:index + 8]:
+                cleaned = DeterministicRuleEngine._clean_group_unit_name(next_line)
+                if cleaned:
+                    return cleaned
+        return None
+
+    @staticmethod
+    def _clean_group_unit_name(text: str) -> str | None:
+        cleaned = (text or "").strip(" ：:，,。；;、 \t\r\n")
+        if not cleaned:
+            return None
+        ignored_values = {"组团单位", "（全称）", "(全称)", "全称", "组织机构代码", "统一社会信用代码"}
+        if cleaned in ignored_values:
+            return None
+        if re.fullmatch(r"[A-Z0-9]{6,}", cleaned):
+            return None
+        if re.fullmatch(r"[\d\s\-—]+", cleaned):
+            return None
+        return cleaned
 
     def _has_personnel_list(self, text: str) -> bool:
         if "团组人员名单" in text or "人员名单" in text:
@@ -404,8 +809,15 @@ class DeterministicRuleEngine:
                     break
         return refs
 
-    def _extract_duration_values(self, page_texts: list[tuple[int, str]]) -> dict[str, tuple[int, int]]:
+    def _extract_duration_values(
+        self,
+        page_texts: list[tuple[int, str]],
+        presentment: PresentmentFacts | None = None,
+    ) -> dict[str, tuple[int, int]]:
         values: dict[str, tuple[int, int]] = {}
+        if presentment and presentment.duration_days is not None:
+            values["呈报表"] = (presentment.page_no or 0, presentment.duration_days)
+
         patterns = [
             ("呈报表", [r"停留时间\s*(\d+)\s*天"]),
             ("邀请函翻译件", [r"在国外停留时间[:：]?\s*(\d+)\s*天", r"停留时间[:：]?\s*(\d+)\s*天"]),
@@ -430,8 +842,15 @@ class DeterministicRuleEngine:
                         break
         return values
 
-    def _extract_invite_units(self, page_texts: list[tuple[int, str]]) -> dict[str, tuple[int, set[str]]]:
+    def _extract_invite_units(
+        self,
+        page_texts: list[tuple[int, str]],
+        presentment: PresentmentFacts | None = None,
+    ) -> dict[str, tuple[int, set[str]]]:
         units: dict[str, tuple[int, set[str]]] = {}
+        if presentment and presentment.invite_unit_cn:
+            units["呈报表"] = (presentment.page_no or 0, {presentment.invite_unit_cn})
+
         for page_no, text in page_texts:
             if "呈报表" in text and "邀请单位" in text and "呈报表" not in units:
                 extracted = self._extract_units_from_presentment(text)
@@ -615,26 +1034,61 @@ class DeterministicRuleEngine:
 
     @staticmethod
     def _extract_presentment_expense_source(page_texts: list[tuple[int, str]]) -> str | None:
+        presentment_text = "\n".join(
+            text for _, text in page_texts
+            if "呈报表" in text or "出呈字" in text
+        )
+        if not presentment_text:
+            return None
+
+        return DeterministicRuleEngine._extract_expense_source_from_presentment_text(presentment_text)
+
+    @staticmethod
+    def _extract_expense_source_from_presentment_text(presentment_text: str) -> str | None:
+        field_values = DeterministicRuleEngine._extract_field_values_after_label(
+            presentment_text,
+            "费用来源",
+            stop_markers=[
+                "开支项目",
+                "出访事由",
+                "邀请单位",
+                "出访地",
+                "经停地",
+                "停留时间",
+            ],
+            max_lines=8,
+        )
+        for value in field_values:
+            cleaned = DeterministicRuleEngine._clean_expense_source_value(value)
+            if cleaned:
+                return cleaned
+
         patterns = [
             r"费用来源开支项目\s*[:：]?\s*([^\n]{0,80})",
             r"费用来源开支项目[^\n]{0,20}?([^\n]{0,80})",
             r"经费列支情况\s*[:：]?\s*([^\n]{0,80})",
             r"费用由([^\n]{0,50})承担",
         ]
-        presentment_text = "\n".join(
-            text for _, text in page_texts
-            if "呈报表" in text
-        )
-        if not presentment_text:
-            return None
 
         for pattern in patterns:
             match = re.search(pattern, presentment_text)
             if match:
-                value = " ".join(match.group(1).split()).strip("：:，,。；; ")
+                value = DeterministicRuleEngine._clean_expense_source_value(match.group(1))
                 if value:
                     return value
         return None
+
+    @staticmethod
+    def _clean_expense_source_value(text: str) -> str | None:
+        cleaned = " ".join((text or "").split()).strip("：:，,。；; ")
+        if not cleaned:
+            return None
+        ignored_values = {"费用来源", "开支项目", "费用来源开支项目"}
+        if cleaned in ignored_values:
+            return None
+        if not DeterministicRuleEngine._has_chinese_text(cleaned):
+            return None
+        return cleaned
 
     @staticmethod
     def _dispatch_matches_expense(dispatch_source: str, expense_source: str) -> bool:
@@ -772,6 +1226,27 @@ class DeterministicRuleEngine:
 
     @staticmethod
     def _extract_units_from_presentment(text: str) -> set[str]:
+        field_values = DeterministicRuleEngine._extract_field_values_after_label(
+            text,
+            "邀请单位",
+            stop_markers=[
+                "(中外文)",
+                "（中外文）",
+                "费用来源",
+                "开支项目",
+                "出访地",
+                "经停地",
+                "停留时间",
+            ],
+            max_lines=8,
+        )
+        if field_values:
+            return {
+                DeterministicRuleEngine._clean_invite_unit_candidate(value)
+                for value in field_values
+                if DeterministicRuleEngine._clean_invite_unit_candidate(value)
+            }
+
         match = re.search(r"邀请单位\s*(.*?)\s*\(中外文\)", text, re.S)
         if not match:
             return set()
@@ -779,19 +1254,19 @@ class DeterministicRuleEngine:
 
     @staticmethod
     def _extract_units_from_invitation(text: str) -> set[str]:
-        high_confidence_patterns = [
+        semantic_patterns = [
+            r"作为主办机构[，,]\s*([^。\n；;]{2,80}?)(?:诚挚地)?邀请",
             r"(?:应|受)([^。\n；;]{2,80}?)(?:邀请)",
             r"(?:邀请单位|主办单位)\s*[:：]?\s*([^。\n；;]{2,80})",
-            r"([\u4e00-\u9fff（）()《》“”]{2,80}?(?:大学|学院|集团|公司|有限公司|股份有限公司|研究院|研究所))\s*(?:诚邀|邀请)",
-            r"联邦国家预算高等教育机构[“\"]([^”\"\n]{2,60}?(?:大学|学院))[”\"]",
+            r"([^。\n；;]{2,80}?)(?:诚挚地|诚挚)?邀请(?:您|贵校|代表团|访问|前来)",
         ]
-        high_confidence_units = DeterministicRuleEngine._extract_units_by_context_patterns(
+        semantic_units = DeterministicRuleEngine._extract_units_by_context_patterns(
             text,
-            high_confidence_patterns,
+            semantic_patterns,
             skip_noisy_context=False,
         )
-        if high_confidence_units:
-            return high_confidence_units
+        if semantic_units:
+            return semantic_units
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         candidates = []
@@ -822,6 +1297,70 @@ class DeterministicRuleEngine:
         return {item for item in cleaned if item}
 
     @staticmethod
+    def _extract_field_values_after_label(
+        text: str,
+        label: str,
+        *,
+        stop_markers: list[str],
+        max_lines: int,
+    ) -> list[str]:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            same_line = re.search(rf"{re.escape(label)}\s*[:：]?\s*(.+)$", line)
+            if same_line:
+                value = same_line.group(1).strip()
+                if value and value != label:
+                    return [value]
+
+            if line != label:
+                continue
+
+            values = []
+            for next_line in lines[index + 1:index + 1 + max_lines]:
+                if any(marker in next_line for marker in stop_markers):
+                    break
+                if DeterministicRuleEngine._is_noise_invite_unit_value(next_line):
+                    continue
+                values.append(next_line)
+                if DeterministicRuleEngine._has_chinese_text(next_line):
+                    break
+            return values
+        return []
+
+    @staticmethod
+    def _clean_invite_unit_candidate(text: str) -> str | None:
+        cleaned = (text or "").strip(" ：:，,。；;、 \t\r\n《》“”\"'")
+        if not cleaned:
+            return None
+        if DeterministicRuleEngine._is_noise_invite_unit_value(cleaned):
+            return None
+        if not DeterministicRuleEngine._has_chinese_text(cleaned):
+            return None
+        return cleaned
+
+    @staticmethod
+    def _has_chinese_text(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]{2,}", text or ""))
+
+    @staticmethod
+    def _is_noise_invite_unit_value(text: str) -> bool:
+        stripped = (text or "").strip()
+        if not stripped:
+            return True
+        noise_values = {
+            "邀请单位",
+            "(中外文)",
+            "（中外文）",
+            "中外文",
+            "全称",
+        }
+        if stripped in noise_values:
+            return True
+        if re.fullmatch(r"[A-Za-z0-9\s,，.()（）&\-]+", stripped):
+            return True
+        return False
+
+    @staticmethod
     def _extract_units_by_context_patterns(
         text: str,
         patterns: list[str],
@@ -835,12 +1374,9 @@ class DeterministicRuleEngine:
                 scope = DeterministicRuleEngine._trim_invite_unit_scope(scope)
                 if skip_noisy_context and DeterministicRuleEngine._is_noisy_invite_unit_context(scope):
                     continue
-                units.update(
-                    DeterministicRuleEngine._extract_chinese_unit_names(
-                        scope,
-                        skip_noisy_context=skip_noisy_context,
-                    )
-                )
+                cleaned = DeterministicRuleEngine._clean_invite_unit_candidate(scope)
+                if cleaned:
+                    units.add(cleaned)
             if units:
                 return units
         return units
@@ -939,7 +1475,10 @@ class DeterministicRuleEngine:
     def _is_real_chinese_invitation_page(text: str) -> bool:
         required_markers = ["邀请函"]
         context_markers = ["时间:", "在国外停留时间", "地点:", "参与形式", "致有关人士"]
-        return all(marker in text for marker in required_markers) and any(marker in text for marker in context_markers)
+        semantic_markers = ["作为主办机构", "诚挚地邀请", "诚挚邀请", "邀请您", "邀请贵校"]
+        if all(marker in text for marker in required_markers) and any(marker in text for marker in context_markers):
+            return True
+        return any(marker in text for marker in semantic_markers)
 
     @staticmethod
     def _format_duration_facts(duration_values: dict[str, tuple[int, int]]) -> str:
