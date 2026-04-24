@@ -91,6 +91,7 @@ class WorkflowManager:
             result.issues.extend(deterministic.issues)
             result.issues = self._sort_issues(result.issues)
             result.passed = len(result.issues) == 0
+            result.summary = self._build_summary_from_final_issues(result.issues)
 
             status = AuditStatus.PASSED.value if result.passed else AuditStatus.REJECTED.value
             self.db.update_record_status(record_id, status, result.to_json())
@@ -316,3 +317,38 @@ class WorkflowManager:
                 issue.description
             )
         )
+
+    @staticmethod
+    def _build_summary_from_final_issues(issues: list[AuditIssue]) -> str:
+        """基于最终问题列表生成摘要，避免保留已过滤的模型初稿判断。"""
+        if not issues:
+            return "审核通过，未发现需要退回修改的问题。"
+
+        counts = {"严重": 0, "一般": 0, "提示": 0}
+        categories: dict[str, int] = {}
+        for issue in issues:
+            counts[issue.severity] = counts.get(issue.severity, 0) + 1
+            categories[issue.category] = categories.get(issue.category, 0) + 1
+
+        severity_parts = [
+            f"{severity}{count}项"
+            for severity, count in counts.items()
+            if count
+        ]
+        category_parts = [
+            f"{category}{count}项"
+            for category, count in categories.items()
+        ]
+
+        leading_issue = issues[0]
+        summary = (
+            f"审核未通过，共发现{len(issues)}项问题，"
+            f"其中{'、'.join(severity_parts)}。"
+        )
+        if category_parts:
+            summary += f"主要涉及：{'、'.join(category_parts)}。"
+        summary += (
+            f"请优先处理“{leading_issue.category}”中的问题："
+            f"{leading_issue.description}"
+        )
+        return summary

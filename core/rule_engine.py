@@ -34,16 +34,15 @@ class DeterministicRuleEngine:
         result = DeterministicResult()
         full_text = "\n".join(text for _, text in page_texts)
         pre_invitation_text = "\n".join(
-            text for _, text in page_texts
-            if not self._is_invitation_page(text)
+            text for _, text in page_texts if not self._is_invitation_page(text)
         )
 
         is_enterprise = self._is_enterprise_group(full_text)
+        is_academic = self._is_academic_group(full_text) and not is_enterprise
+        academic_modes = self._detect_academic_modes(full_text)
+
         has_personnel_list = self._has_personnel_list(full_text)
-        has_public_notice = any(
-            phrase in pre_invitation_text
-            for phrase in ["公示无异议", "已按规定进行公示", "公示情况"]
-        )
+        has_public_notice = self._has_public_notice(pre_invitation_text)
         has_translation_info = (
             any(
                 phrase in pre_invitation_text
@@ -53,20 +52,61 @@ class DeterministicRuleEngine:
         transport_refs = self._find_transport_references(page_texts)
         duration_values = self._extract_duration_values(page_texts)
         invite_units = self._extract_invite_units(page_texts)
+        dispatch_source = self._detect_dispatch_source(full_text)
+        dispatch_material = self._detect_dispatch_material(page_texts)
+        expense_source = self._extract_presentment_expense_source(page_texts)
+        has_academic_group_marker = self._has_academic_group_marker(page_texts)
+
+        is_long_term_visiting = (
+            is_academic
+            and "访学" in academic_modes
+            and self._max_duration(duration_values) >= 90
+        )
+        is_academic_exchange_group = (
+            is_academic
+            and "访学" not in academic_modes
+            and any(mode in academic_modes for mode in ["学术交流", "校际交流"])
+        )
 
         result.facts.update({
             "企业团组": "是" if is_enterprise else "否",
+            "高校科研院所团组": "是" if is_academic else "否",
+            "任务类型": "、".join(academic_modes) if academic_modes else "未识别",
             "已识别人员名单": "是" if has_personnel_list else "否",
             "已识别公示情况": "是" if has_public_notice else "否",
             "已识别翻译情况": "是" if has_translation_info else "否",
             "已识别交通班次信息": "是" if transport_refs else "否",
             "已提取停留天数": self._format_duration_facts(duration_values),
             "已提取邀请单位": self._format_invite_unit_facts(invite_units),
+            "已识别委派来源": dispatch_source or "未识别",
+            "已识别委派材料": dispatch_material or "未识别",
+            "已识别经费列支": expense_source or "未识别",
+            "已识别学术交流团组标注": "是" if has_academic_group_marker else "否",
         })
 
         if is_enterprise:
             result.notes.append(
                 "已按企业团组处理；列入计划情况、周末公务情况、翻译情况、是否学术交流团缺失不直接作为问题。"
+            )
+        if is_academic:
+            result.notes.append(
+                "已按高校、科研院所团组处理；应优先区分访学、学术交流、校际交流，再按对应政策口径审核。"
+            )
+        if is_long_term_visiting:
+            result.notes.append(
+                "已识别为高校、科研院所长期访学团组（通常三个月以上）；如呈报表末尾已写明公示情况，不再机械要求列入计划情况、周末公务情况、翻译情况等表述。"
+            )
+        if dispatch_source:
+            result.notes.append(
+                f"已识别委派来源为“{dispatch_source}”；应关注是否附有相关委派材料，并核对呈报表“费用来源开支项目”栏是否与该委派来源一致。"
+            )
+        if dispatch_material:
+            result.notes.append(
+                f"已通过附件第一页标题关键词识别到“{dispatch_material}”类委派材料。"
+            )
+        if is_academic_exchange_group:
+            result.notes.append(
+                "已识别为高校、科研院所学术交流/校际交流团组；应重点检查呈报表最后一页是否标注类似“此团系学术交流团组”。"
             )
         if has_personnel_list:
             result.notes.append("材料已出现“团组人员名单”或名单式内容，不得判为缺少人员名单。")
@@ -75,13 +115,24 @@ class DeterministicRuleEngine:
         if has_translation_info:
             result.notes.append("材料已明确写出翻译情况，如“某某同志担任翻译”。")
         if transport_refs:
-            result.notes.append(
-                "材料中已识别到交通班次信息，不应再误判为缺少航班号或车次。"
-            )
+            result.notes.append("材料中已识别到交通班次信息，不应再误判为缺少航班号或车次。")
 
-        result.issues.extend(self._find_banned_word_issues(page_texts))
+        result.issues.extend(self._find_banned_word_issues(page_texts, is_academic=is_academic))
         result.issues.extend(self._find_duration_consistency_issues(duration_values))
         result.issues.extend(self._find_invite_unit_consistency_issues(invite_units))
+        result.issues.extend(
+            self._find_academic_group_policy_issues(
+                is_academic=is_academic,
+                academic_modes=academic_modes,
+                is_long_term_visiting=is_long_term_visiting,
+                has_public_notice=has_public_notice,
+                dispatch_source=dispatch_source,
+                dispatch_material=dispatch_material,
+                expense_source=expense_source,
+                has_academic_group_marker=has_academic_group_marker,
+                page_texts=page_texts,
+            )
+        )
         return result
 
     def filter_llm_issues(
@@ -91,13 +142,18 @@ class DeterministicRuleEngine:
     ) -> list[AuditIssue]:
         filtered = []
         is_enterprise = deterministic.facts.get("企业团组") == "是"
+        is_academic = deterministic.facts.get("高校科研院所团组") == "是"
+        task_modes = str(deterministic.facts.get("任务类型") or "")
         has_personnel_list = deterministic.facts.get("已识别人员名单") == "是"
         has_public_notice = deterministic.facts.get("已识别公示情况") == "是"
         has_translation_info = deterministic.facts.get("已识别翻译情况") == "是"
         has_transport_refs = deterministic.facts.get("已识别交通班次信息") == "是"
+        is_long_term_visiting = is_academic and "访学" in task_modes and has_public_notice
 
         for issue in llm_issues:
             text = f"{issue.category} {issue.description} {issue.location}"
+            if is_academic and self._is_academic_learning_issue(text):
+                continue
             if self._is_banned_word_issue(issue):
                 continue
             if self._is_document_code_issue(text):
@@ -116,6 +172,8 @@ class DeterministicRuleEngine:
                 continue
             if is_enterprise and any(word in text for word in ["列入计划情况", "周末公务情况", "翻译情况", "是否学术交流团"]):
                 continue
+            if is_long_term_visiting and any(word in text for word in ["列入计划情况", "周末公务情况", "翻译情况", "是否学术交流团"]):
+                continue
             if has_public_notice and any(word in text for word in ["公示情况", "未公示", "未注明公示"]):
                 continue
             if has_translation_info and any(word in text for word in ["翻译情况", "未注明翻译", "未写翻译"]):
@@ -133,21 +191,66 @@ class DeterministicRuleEngine:
         keywords = ["集团", "公司", "有限公司", "股份公司", "股份有限公司"]
         return "组团单位" in text and any(keyword in text for keyword in keywords)
 
+    def _is_academic_group(self, text: str) -> bool:
+        keywords = ["大学", "学院", "学校", "研究院", "研究所", "实验室", "科研院所"]
+        return "组团单位" in text and any(keyword in text for keyword in keywords)
+
     def _has_personnel_list(self, text: str) -> bool:
         if "团组人员名单" in text or "人员名单" in text:
             return True
         required_fields = ["姓名", "身份证号码", "工作单位及职务"]
         return all(field in text for field in required_fields)
 
-    def _find_banned_word_issues(self, page_texts: list[tuple[int, str]]) -> list[AuditIssue]:
+    @staticmethod
+    def _has_public_notice(text: str) -> bool:
+        direct_phrases = [
+            "公示无异议",
+            "已按规定进行公示",
+            "已按规定公示",
+            "按规定进行公示",
+            "按规定公示",
+            "已公示",
+            "公示情况",
+            "经公示无异议",
+            "群众无异议",
+        ]
+        if any(phrase in text for phrase in direct_phrases):
+            return True
+
+        has_notice_word = "公示" in text
+        has_no_objection_word = any(
+            phrase in text for phrase in ["无异议", "群众无异议", "无不同意见"]
+        )
+        return has_notice_word and has_no_objection_word
+
+    @staticmethod
+    def _detect_academic_modes(text: str) -> list[str]:
+        modes = []
+        if "访学" in text:
+            modes.append("访学")
+        if "校际交流" in text:
+            modes.append("校际交流")
+        if "学术交流" in text:
+            modes.append("学术交流")
+        return modes
+
+    def _find_banned_word_issues(
+        self,
+        page_texts: list[tuple[int, str]],
+        is_academic: bool = False
+    ) -> list[AuditIssue]:
         banned_words = ["参观", "考察", "调研", "学习"]
         findings = []
         for page_no, text in page_texts:
             if self._is_invitation_page(text):
                 continue
+            if not self._is_core_review_page(text):
+                continue
 
             for word in banned_words:
                 if word not in text:
+                    continue
+                if word == "学习" and is_academic:
                     continue
                 if word == "学习" and any(marker in text for marker in ["培训", "访学", "学术交流"]):
                     continue
@@ -287,16 +390,80 @@ class DeterministicRuleEngine:
 
         return [AuditIssue("严重", "跨材料一致性校验", description, "、".join(dict.fromkeys(locations)))]
 
+    def _find_academic_group_policy_issues(
+        self,
+        *,
+        is_academic: bool,
+        academic_modes: list[str],
+        is_long_term_visiting: bool,
+        has_public_notice: bool,
+        dispatch_source: str | None,
+        dispatch_material: str | None,
+        expense_source: str | None,
+        has_academic_group_marker: bool,
+        page_texts: list[tuple[int, str]],
+    ) -> list[AuditIssue]:
+        if not is_academic:
+            return []
+
+        issues: list[AuditIssue] = []
+
+        if is_long_term_visiting and not has_public_notice:
+            issues.append(
+                AuditIssue(
+                    "严重",
+                    "呈报表审核",
+                    "高校、科研院所长期访学团组（通常三个月以上）应在呈报表末尾明确写明公示情况，当前未稳定识别到相关表述。",
+                    self._find_presentment_last_page(page_texts),
+                )
+            )
+
+        if dispatch_source and not dispatch_material:
+            issues.append(
+                AuditIssue(
+                    "严重",
+                    "呈报表审核",
+                    f"已识别该高校、科研院所团组属于“{dispatch_source}”情形，但当前未通过附件第一页标题稳定识别到相应委派材料。",
+                    self._find_dispatch_keyword_location(page_texts),
+                )
+            )
+
+        if dispatch_source and expense_source and not self._dispatch_matches_expense(dispatch_source, expense_source):
+            issues.append(
+                AuditIssue(
+                    "严重",
+                    "跨材料一致性校验",
+                    f"高校、科研院所委派来源与呈报表“费用来源开支项目”疑似不一致：委派来源为“{dispatch_source}”，该栏中识别为“{expense_source}”。",
+                    self._find_presentment_and_dispatch_locations(page_texts),
+                )
+            )
+
+        if (
+            "访学" not in academic_modes
+            and any(mode in academic_modes for mode in ["学术交流", "校际交流"])
+            and not has_academic_group_marker
+        ):
+            issues.append(
+                AuditIssue(
+                    "严重",
+                    "呈报表审核",
+                    "高校、科研院所学术交流/校际交流团组应在呈报表最后一页标注类似“此团系学术交流团组”的说明，当前未稳定识别到该标注。",
+                    self._find_presentment_last_page(page_texts),
+                )
+            )
+
+        return issues
+
     @staticmethod
     def _invite_units_match(base_units: set[str], other_units: set[str]) -> bool:
         if not base_units or not other_units:
             return False
 
         def normalize(unit: str) -> str:
-            return unit.replace("中国", "").replace("（", "").replace("）", "").strip()
+            return DeterministicRuleEngine._normalize_invite_unit_for_match(unit)
 
-        normalized_base = {normalize(unit) for unit in base_units}
-        normalized_other = {normalize(unit) for unit in other_units}
+        normalized_base = {normalize(unit) for unit in base_units if normalize(unit)}
+        normalized_other = {normalize(unit) for unit in other_units if normalize(unit)}
 
         for base in normalized_base:
             if any(base in other or other in base for other in normalized_other):
@@ -304,9 +471,149 @@ class DeterministicRuleEngine:
         return False
 
     @staticmethod
+    def _detect_dispatch_source(text: str) -> str | None:
+        rules = [
+            ("国家留学基金委", ["国家留学基金委", "国家公派留学", "国家留学基金管理委员会"]),
+            ("省派", ["省派", "省公派", "省公派留学"]),
+            ("校派", ["校派", "学校公派", "校级公派"]),
+        ]
+        for label, markers in rules:
+            if any(marker in text for marker in markers):
+                return label
+        return None
+
+    def _detect_dispatch_material(self, page_texts: list[tuple[int, str]]) -> str | None:
+        for _, text in page_texts:
+            title_scope = "\n".join(
+                line.strip() for line in text.splitlines()[:8] if line.strip()
+            )
+            if not title_scope:
+                continue
+            if self._is_non_dispatch_material_page(title_scope):
+                continue
+            if "国家留学基金委" in title_scope:
+                return "国家留学基金委"
+            if "省" in title_scope and any(marker in title_scope for marker in ["公派出国留学", "公派留学", "省派"]):
+                return "省派"
+            if any(marker in title_scope for marker in ["通知", "关于"]) and any(
+                marker in title_scope for marker in ["大学", "学院", "学校", "研究院", "研究所"]
+            ):
+                return "校派"
+        return None
+
+    @staticmethod
+    def _is_non_dispatch_material_page(text: str) -> bool:
+        markers = [
+            "呈报表",
+            "团组人员名单",
+            "人员名单",
+            "日程安排",
+            "邀请函",
+            "预算审批意见表",
+            "情况说明",
+        ]
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _extract_presentment_expense_source(page_texts: list[tuple[int, str]]) -> str | None:
+        patterns = [
+            r"费用来源开支项目\s*[:：]?\s*([^\n]{0,80})",
+            r"费用来源开支项目[^\n]{0,20}?([^\n]{0,80})",
+            r"经费列支情况\s*[:：]?\s*([^\n]{0,80})",
+            r"费用由([^\n]{0,50})承担",
+        ]
+        presentment_text = "\n".join(
+            text for _, text in page_texts
+            if "呈报表" in text
+        )
+        if not presentment_text:
+            return None
+
+        for pattern in patterns:
+            match = re.search(pattern, presentment_text)
+            if match:
+                value = " ".join(match.group(1).split()).strip("：:，,。；; ")
+                if value:
+                    return value
+        return None
+
+    @staticmethod
+    def _dispatch_matches_expense(dispatch_source: str, expense_source: str) -> bool:
+        if "派员单位承担" in expense_source:
+            return True
+        mapping = {
+            "国家留学基金委": ["国家留学基金委", "国家公派", "国家公派留学", "留学基金委承担"],
+            "省派": ["省派", "省公派", "省公派留学", "省派承担"],
+            "校派": ["校派", "学校", "校级", "校公派", "派员单位承担"],
+        }
+        return any(marker in expense_source for marker in mapping.get(dispatch_source, []))
+
+    @staticmethod
+    def _has_academic_group_marker(page_texts: list[tuple[int, str]]) -> bool:
+        markers = ["此团系学术交流团组", "系学术交流团组", "属于学术交流团组"]
+        return any(
+            any(marker in text for marker in markers)
+            for _, text in page_texts
+            if "呈报表" in text
+        )
+
+    @staticmethod
+    def _max_duration(duration_values: dict[str, tuple[int, int]]) -> int:
+        if not duration_values:
+            return 0
+        return max(value for _, value in duration_values.values())
+
+    @staticmethod
+    def _find_presentment_last_page(page_texts: list[tuple[int, str]]) -> str:
+        pages = [page_no for page_no, text in page_texts if "呈报表" in text]
+        if not pages:
+            return "位置待人工核对"
+        return f"第{max(pages)}页"
+
+    @staticmethod
+    def _find_presentment_and_dispatch_locations(page_texts: list[tuple[int, str]]) -> str:
+        locations = []
+        presentment_pages = [page_no for page_no, text in page_texts if "呈报表" in text]
+        if presentment_pages:
+            locations.append(f"第{max(presentment_pages)}页")
+        dispatch_pages = [
+            page_no for page_no, text in page_texts
+            if any(marker in text for marker in ["国家留学基金委", "省派", "省公派", "校派", "国家公派留学"])
+        ]
+        if dispatch_pages:
+            locations.extend(f"第{page}页" for page in dispatch_pages[:2])
+        return "、".join(dict.fromkeys(locations)) if locations else "位置待人工核对"
+
+    @staticmethod
+    def _find_dispatch_keyword_location(page_texts: list[tuple[int, str]]) -> str:
+        dispatch_pages = [
+            page_no for page_no, text in page_texts
+            if any(marker in text for marker in ["国家留学基金委", "省派", "省公派", "校派", "国家公派留学"])
+        ]
+        if dispatch_pages:
+            return "、".join(f"第{page}页" for page in dict.fromkeys(dispatch_pages))
+        return "位置待人工核对"
+
+    @staticmethod
+    def _is_core_review_page(text: str) -> bool:
+        markers = [
+            "呈报表",
+            "日程安排",
+            "情况说明",
+            "团组人员名单",
+            "人员名单",
+            "预算审批意见表",
+        ]
+        return any(marker in text for marker in markers)
+
+    @staticmethod
     def _is_banned_word_issue(issue: AuditIssue) -> bool:
         text = f"{issue.category} {issue.description}"
         return any(keyword in text for keyword in ["参观", "考察", "调研", "学习"])
+
+    @staticmethod
+    def _is_academic_learning_issue(text: str) -> bool:
+        return "学习" in text
 
     @staticmethod
     def _is_document_code_issue(text: str) -> bool:
@@ -373,37 +680,155 @@ class DeterministicRuleEngine:
 
     @staticmethod
     def _extract_units_from_invitation(text: str) -> set[str]:
-        preferred_patterns = [
-            r"《?“?([\u4e00-\u9fff]{2,}(?:大学|学院|集团|公司|有限公司|股份有限公司|研究院))”?",
-            r"应([\u4e00-\u9fff]{2,}(?:大学|学院|集团|公司|有限公司|股份有限公司|研究院))邀请",
-            r"联邦国家预算高等教育机构“([\u4e00-\u9fff]{2,}(?:大学|学院))”",
+        high_confidence_patterns = [
+            r"(?:应|受)([^。\n；;]{2,80}?)(?:邀请)",
+            r"(?:邀请单位|主办单位)\s*[:：]?\s*([^。\n；;]{2,80})",
+            r"([\u4e00-\u9fff（）()《》“”]{2,80}?(?:大学|学院|集团|公司|有限公司|股份有限公司|研究院|研究所))\s*(?:诚邀|邀请)",
+            r"联邦国家预算高等教育机构[“\"]([^”\"\n]{2,60}?(?:大学|学院))[”\"]",
         ]
-        for pattern in preferred_patterns:
-            matches = re.findall(pattern, text)
-            cleaned = {
-                match.replace("(", "（").replace(")", "）").strip()
-                for match in matches
-                if match
-            }
-            if cleaned:
-                return cleaned
+        high_confidence_units = DeterministicRuleEngine._extract_units_by_context_patterns(
+            text,
+            high_confidence_patterns,
+            skip_noisy_context=False,
+        )
+        if high_confidence_units:
+            return high_confidence_units
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         candidates = []
-        for line in lines[:6]:
+        for line in lines[:8]:
+            if DeterministicRuleEngine._is_noisy_invite_unit_context(line):
+                continue
             if re.search(r"[\u4e00-\u9fff]{2,}", line):
                 candidates.append(line)
-        return DeterministicRuleEngine._extract_chinese_unit_names(" ".join(candidates[:2]))
+        return DeterministicRuleEngine._extract_chinese_unit_names(
+            " ".join(candidates[:3]),
+            skip_noisy_context=True,
+        )
 
     @staticmethod
-    def _extract_chinese_unit_names(text: str) -> set[str]:
+    def _extract_chinese_unit_names(text: str, skip_noisy_context: bool = False) -> set[str]:
         normalized = text.replace("，", " ").replace(",", " ").replace("、", " ")
-        matches = re.findall(r"[\u4e00-\u9fff（）()]{2,}(?:大学|学院|集团|公司|有限公司|股份有限公司|研究院)", normalized)
-        cleaned = {
-            match.replace("(", "（").replace(")", "）").strip()
-            for match in matches
-        }
+        unit_pattern = r"[\u4e00-\u9fff（）()《》“”]{2,}(?:股份有限公司|有限公司|股份公司|大学|学院|集团|公司|研究院|研究所)"
+        cleaned = set()
+        for match in re.finditer(unit_pattern, normalized):
+            context_start = max(0, match.start() - 16)
+            context_end = min(len(normalized), match.end() + 16)
+            context = normalized[context_start:context_end]
+            if skip_noisy_context and DeterministicRuleEngine._is_noisy_invite_unit_context(context):
+                continue
+            candidate = DeterministicRuleEngine._clean_chinese_unit_name(match.group(0))
+            if candidate:
+                cleaned.add(candidate)
         return {item for item in cleaned if item}
+
+    @staticmethod
+    def _extract_units_by_context_patterns(
+        text: str,
+        patterns: list[str],
+        *,
+        skip_noisy_context: bool,
+    ) -> set[str]:
+        units: set[str] = set()
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                scope = match.group(1) if match.groups() else match.group(0)
+                scope = DeterministicRuleEngine._trim_invite_unit_scope(scope)
+                if skip_noisy_context and DeterministicRuleEngine._is_noisy_invite_unit_context(scope):
+                    continue
+                units.update(
+                    DeterministicRuleEngine._extract_chinese_unit_names(
+                        scope,
+                        skip_noisy_context=skip_noisy_context,
+                    )
+                )
+            if units:
+                return units
+        return units
+
+    @staticmethod
+    def _trim_invite_unit_scope(text: str) -> str:
+        scope = text or ""
+        boundary_markers = [
+            "联系人",
+            "联系地址",
+            "地址",
+            "电话",
+            "邮箱",
+            "电子邮件",
+            "抄送",
+            "附件",
+            "承办单位",
+        ]
+        indexes = [scope.find(marker) for marker in boundary_markers if marker in scope]
+        if indexes:
+            scope = scope[:min(indexes)]
+        return scope.strip(" ：:，,。；;、 \t\r\n")
+
+    @staticmethod
+    def _clean_chinese_unit_name(unit: str) -> str:
+        cleaned = (unit or "").replace("(", "（").replace(")", "）").strip()
+        cleaned = cleaned.strip(" ：:，,。；;、 \t\r\n《》“”\"'")
+        prefix_patterns = [
+            r"^.*?联邦国家预算高等教育机构[“”\"]?",
+            r"^.*?国家预算高等教育机构[“”\"]?",
+            r"^.*?高等教育机构[“”\"]?",
+            r"^.*?应",
+            r"^.*?受",
+        ]
+        for pattern in prefix_patterns:
+            cleaned = re.sub(pattern, "", cleaned).strip(" ：:，,。；;、 \t\r\n《》“”\"'")
+        cleaned = re.sub(r"^(邀请单位|主办单位|承办单位)\s*[:：]?", "", cleaned)
+        return cleaned.strip(" ：:，,。；;、 \t\r\n《》“”\"'")
+
+    @staticmethod
+    def _normalize_invite_unit_for_match(unit: str) -> str:
+        normalized = DeterministicRuleEngine._clean_chinese_unit_name(unit)
+        remove_tokens = [
+            "中国",
+            "中华人民共和国",
+            "俄罗斯联邦",
+            "联邦国家预算高等教育机构",
+            "国家预算高等教育机构",
+            "高等教育机构",
+            "（",
+            "）",
+            "(",
+            ")",
+            " ",
+            "\u3000",
+            "《",
+            "》",
+            "“",
+            "”",
+            "\"",
+        ]
+        for token in remove_tokens:
+            normalized = normalized.replace(token, "")
+        return normalized.strip()
+
+    @staticmethod
+    def _is_noisy_invite_unit_context(text: str) -> bool:
+        noise_markers = [
+            "承办单位",
+            "联系人",
+            "联系地址",
+            "地址",
+            "电话",
+            "邮箱",
+            "电子邮件",
+            "抄送",
+            "附件",
+            "通知",
+            "批复",
+            "证明",
+            "经费",
+            "费用",
+            "派出",
+            "派员",
+            "工作单位",
+        ]
+        return any(marker in text for marker in noise_markers)
 
     @staticmethod
     def _is_english_only_invitation(text: str) -> bool:
