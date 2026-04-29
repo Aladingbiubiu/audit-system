@@ -31,6 +31,12 @@
 
 ## 最近已经完成的关键点
 
+- 已新增低耦合历史出访知识库模块：
+  - 独立入口 `history_app.py`
+  - 独立模块目录 `history/`
+  - 独立数据库 `data/history.db`
+  - 每个 PDF 按一次出访任务建库，支持递归批量导入、重复标记、档案筛选、人工修正和按国家推荐
+  - 仅通过适配器复用 `core/pdf_parser.py` 和 `DeterministicRuleEngine.extract_facts()`，不接入 `workflow.py`，不影响现有审核流程
 - 已接入 OCR，扫描页可识别
 - 已支持程序判断：
   - 禁用词
@@ -63,6 +69,17 @@
   - 文号相关
   - 团长（级别）
   - 落款 / 印章日期 OCR 不清类问题
+
+## 历史出访知识库当前状态
+
+- 进展记录见 [lishishuju.md](</d:/My Project/claude test/audit-system/lishishuju.md>)
+- 启动方式：
+  - `python -m streamlit run history_app.py --server.address 127.0.0.1 --server.port 8502`
+- 当前边界：
+  - 不写入 `data/audit.db`
+  - 不修改 `app.py` 的审核页面
+  - 不在审核完成后自动归入历史库
+  - `data/history.db` 为运行数据，已加入 `.gitignore`
 
 ## 当前最重要的已落地规则
 

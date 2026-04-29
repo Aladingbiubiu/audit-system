@@ -42,7 +42,7 @@ class DeterministicResult:
 class DeterministicRuleEngine:
     def evaluate(self, page_texts: list[tuple[int, str]]) -> DeterministicResult:
         result = DeterministicResult()
-        facts = self._extract_document_facts(page_texts)
+        facts = self.extract_facts(page_texts)
         policy = PolicySelector.select(facts.profile)
 
         result.facts.update(self._format_facts_for_prompt(facts))
@@ -50,6 +50,10 @@ class DeterministicRuleEngine:
         result.notes.extend(self._build_policy_notes(facts))
         result.issues.extend(RuleRunner(self._build_rules()).run(facts, policy))
         return result
+
+    def extract_facts(self, page_texts: list[tuple[int, str]]) -> DocumentFacts:
+        """Return extracted document facts without running audit decisions."""
+        return self._extract_document_facts(page_texts)
 
     def _extract_document_facts(self, page_texts: list[tuple[int, str]]) -> DocumentFacts:
         full_text = "\n".join(text for _, text in page_texts)
