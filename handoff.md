@@ -158,6 +158,8 @@
 
 - 继续用真实 PDF 回放 `PresentmentFacts` / `BudgetFacts`，先稳定字段事实层
 - 增强呈报表 `出访事由` 抽取，尤其是 OCR 拆字标题场景
+- 已新增字段回放工具 `tools/replay_facts.py`，可对单个 PDF 或目录递归输出 `PresentmentFacts` / `BudgetFacts` / 团组画像等诊断 JSON
+  - 示例：`python tools/replay_facts.py . --no-ocr --limit 1 --pretty`
 
 ### P2
 

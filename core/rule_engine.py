@@ -636,26 +636,89 @@ class DeterministicRuleEngine:
     def _extract_presentment_visit_reason(text: str) -> str | None:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         start_index = None
+        initial_value = None
         for index, line in enumerate(lines):
-            compact = line.replace(" ", "")
-            if compact in {"出访事由", "出访事由"}:
-                start_index = index + 1
-                break
-            if "出访事由" in compact:
-                start_index = index + 1
+            match = DeterministicRuleEngine._match_visit_reason_label(lines, index)
+            if match:
+                start_index, initial_value = match
                 break
         if start_index is None:
             return None
 
-        stop_markers = ["单位公章", "团组人员名单", "附件：", "附件"]
+        stop_markers = [
+            "单位公章",
+            "团组人员名单",
+            "人员名单",
+            "日程安排",
+            "预算审批",
+            "经费审核",
+            "附件：",
+            "附件",
+            "签发人",
+            "填表人",
+            "经办人",
+        ]
         values = []
-        for line in lines[start_index:start_index + 12]:
+        if initial_value:
+            values.append(initial_value)
+        for line in lines[start_index:start_index + 18]:
             if any(marker in line for marker in stop_markers):
                 break
-            cleaned = line.strip(" ：:，,。；;、 \t\r\n")
+            cleaned = DeterministicRuleEngine._clean_visit_reason_line(line)
             if cleaned:
                 values.append(cleaned)
-        return " ".join(values).strip() or None
+            if sum(len(value) for value in values) >= 500:
+                break
+        return " ".join(values).strip(" ：:，,。；;、 \t\r\n") or None
+
+    @staticmethod
+    def _match_visit_reason_label(lines: list[str], index: int) -> tuple[int, str | None] | None:
+        line = lines[index]
+        same_line = re.search(r"出\s*访\s*事\s*由\s*[:：]?\s*(.*)$", line)
+        if same_line:
+            value = DeterministicRuleEngine._clean_visit_reason_line(same_line.group(1))
+            return index + 1, value
+
+        joined = ""
+        for offset, next_line in enumerate(lines[index:index + 8]):
+            compact = re.sub(r"[\s:：；;，,。、“”\"'（）()\[\]【】]+", "", next_line)
+            if not compact:
+                continue
+            joined += compact
+            if joined == "出访事由":
+                return index + offset + 1, None
+            if joined.startswith("出访事由") and len(joined) > len("出访事由"):
+                tail = joined[len("出访事由"):]
+                value = DeterministicRuleEngine._clean_visit_reason_line(tail)
+                return index + offset + 1, value
+            if not "出访事由".startswith(joined):
+                return None
+        return None
+
+    @staticmethod
+    def _clean_visit_reason_line(line: str | None) -> str | None:
+        cleaned = (line or "").strip(" ：:，,。；;、 \t\r\n")
+        if not cleaned:
+            return None
+        compact = re.sub(r"\s+", "", cleaned)
+        if compact in {"出", "访", "事", "由", "出访", "事由", "出访事由"}:
+            return None
+        label_like = [
+            "组团单位",
+            "出访地",
+            "经停地",
+            "停留时间",
+            "在外停留",
+            "邀请单位",
+            "费用来源",
+            "开支项目",
+            "单位公章",
+            "团组人员名单",
+            "人员名单",
+        ]
+        if any(compact.startswith(label) for label in label_like):
+            return None
+        return cleaned
 
     def _extract_group_unit_name(self, page_texts: list[tuple[int, str]]) -> str | None:
         presentment_pages = [
