@@ -72,6 +72,7 @@ class DocumentFacts:
     has_public_notice: bool = False
     has_translation_info: bool = False
     transport_refs: list[tuple[int, str]] = field(default_factory=list)
+    schedule_weekday_mismatches: list[dict[str, object]] = field(default_factory=list)
     duration_values: dict[str, tuple[int, int]] = field(default_factory=dict)
     invite_units: dict[str, tuple[int, set[str]]] = field(default_factory=dict)
     dispatch_source: str | None = None
@@ -143,6 +144,7 @@ class PolicySelector:
         "text.banned_words",
         "duration.cross_material_consistency",
         "invite_unit.chinese_name_consistency",
+        "schedule.weekday_consistency",
     )
 
     @classmethod

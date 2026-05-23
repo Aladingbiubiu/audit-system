@@ -1,4 +1,5 @@
 import re
+from datetime import date
 from dataclasses import dataclass, field
 
 from .auditor import AuditIssue
@@ -77,6 +78,7 @@ class DeterministicRuleEngine:
             ) or ("翻译" in pre_invitation_text and "担任" in pre_invitation_text)
         )
         transport_refs = self._find_transport_references(page_texts)
+        schedule_weekday_mismatches = self._find_schedule_weekday_mismatches(page_texts)
         duration_values = self._extract_duration_values(page_texts, presentment)
         invite_units = self._extract_invite_units(page_texts, presentment)
         dispatch_source = self._detect_dispatch_source(full_text)
@@ -123,6 +125,7 @@ class DeterministicRuleEngine:
             has_public_notice=has_public_notice,
             has_translation_info=has_translation_info,
             transport_refs=transport_refs,
+            schedule_weekday_mismatches=schedule_weekday_mismatches,
             duration_values=duration_values,
             invite_units=invite_units,
             dispatch_source=dispatch_source,
@@ -144,6 +147,7 @@ class DeterministicRuleEngine:
             "已识别公示情况": "是" if facts.has_public_notice else "否",
             "已识别翻译情况": "是" if facts.has_translation_info else "否",
             "已识别交通班次信息": "是" if facts.transport_refs else "否",
+            "日程日期星期校验": self._format_schedule_weekday_mismatches(facts.schedule_weekday_mismatches),
             "已提取停留天数": self._format_duration_facts(facts.duration_values),
             "已提取邀请单位": self._format_invite_unit_facts(facts.invite_units),
             "预算表已提取组团单位": facts.budget.group_unit or "未识别",
@@ -229,6 +233,19 @@ class DeterministicRuleEngine:
                     requires_facts=("invite_units",),
                 ),
                 lambda facts: self._find_invite_unit_consistency_issues(facts.invite_units),
+            ),
+            Rule(
+                RuleMetadata(
+                    id="schedule.weekday_consistency",
+                    name="日程日期星期一致性",
+                    layer="consistency",
+                    severity="严重",
+                    applies_to=all_group_types,
+                    requires_facts=("schedule_weekday_mismatches",),
+                ),
+                lambda facts: self._find_schedule_weekday_consistency_issues(
+                    facts.schedule_weekday_mismatches
+                ),
             ),
             Rule(
                 RuleMetadata(
@@ -876,6 +893,59 @@ class DeterministicRuleEngine:
                     break
         return refs
 
+    def _find_schedule_weekday_mismatches(
+        self,
+        page_texts: list[tuple[int, str]],
+    ) -> list[dict[str, object]]:
+        mismatches: list[dict[str, object]] = []
+        document_year = self._infer_schedule_year(
+            "\n".join(text for _, text in page_texts)
+        )
+        current_year = document_year
+
+        for page_no, text in page_texts:
+            if not self._is_schedule_page(text):
+                continue
+
+            current_year = self._infer_schedule_year(text) or current_year or document_year
+            for line in text.splitlines():
+                compact_line = re.sub(r"\s+", "", line)
+                if not compact_line:
+                    continue
+
+                explicit_year = re.search(r"(20\d{2})年", compact_line)
+                if explicit_year:
+                    current_year = int(explicit_year.group(1))
+
+                for match in re.finditer(
+                    r"(?:(?P<year>20\d{2})年)?"
+                    r"(?P<month>1[0-2]|0?[1-9])月"
+                    r"(?P<day>3[01]|[12]\d|0?[1-9])日"
+                    r"[（(]?(?P<weekday>星期[一二三四五六日天]|周[一二三四五六日天])",
+                    compact_line,
+                ):
+                    year = int(match.group("year")) if match.group("year") else current_year
+                    if year is None:
+                        continue
+
+                    month = int(match.group("month"))
+                    day = int(match.group("day"))
+                    actual_weekday = self._normalize_chinese_weekday(match.group("weekday"))
+                    expected_weekday = self._expected_chinese_weekday(year, month, day)
+                    if expected_weekday is None or actual_weekday == expected_weekday:
+                        continue
+
+                    mismatches.append(
+                        {
+                            "page_no": page_no,
+                            "date": f"{year}年{month}月{day}日",
+                            "actual_weekday": actual_weekday,
+                            "expected_weekday": expected_weekday,
+                            "snippet": self._compact_snippet(line or compact_line),
+                        }
+                    )
+        return mismatches
+
     def _extract_duration_values(
         self,
         page_texts: list[tuple[int, str]],
@@ -974,6 +1044,37 @@ class DeterministicRuleEngine:
             description += f"；{label}为" + "、".join(sorted(units))
 
         return [AuditIssue("严重", "跨材料一致性校验", description, "、".join(dict.fromkeys(locations)))]
+
+    def _find_schedule_weekday_consistency_issues(
+        self,
+        mismatches: list[dict[str, object]],
+    ) -> list[AuditIssue]:
+        if not mismatches:
+            return []
+
+        details = []
+        locations = []
+        for item in mismatches[:5]:
+            date_text = str(item.get("date") or "")
+            actual = str(item.get("actual_weekday") or "")
+            expected = str(item.get("expected_weekday") or "")
+            details.append(f"{date_text}标注为{actual}，实际为{expected}")
+            page_no = item.get("page_no")
+            if page_no:
+                locations.append(f"第{page_no}页")
+
+        description = "日程安排中日期与星期不一致：" + "；".join(details)
+        if len(mismatches) > 5:
+            description += f"；另有{len(mismatches) - 5}处同类问题。"
+
+        return [
+            AuditIssue(
+                severity="严重",
+                category="出访行程审核",
+                description=description,
+                location="、".join(dict.fromkeys(locations)) or "日程安排",
+            )
+        ]
 
     def _find_academic_group_policy_issues(
         self,
@@ -1213,6 +1314,49 @@ class DeterministicRuleEngine:
         if dispatch_pages:
             return "、".join(f"第{page}页" for page in dict.fromkeys(dispatch_pages))
         return "位置待人工核对"
+
+    @staticmethod
+    def _is_schedule_page(text: str) -> bool:
+        if "邀请函" in text or "预算审批意见表" in text or "呈报表" in text:
+            return False
+        schedule_markers = ["日程安排", "行程安排", "出访日程", "访问日程"]
+        weekday_markers = ["星期", "周一", "周二", "周三", "周四", "周五", "周六", "周日", "周天"]
+        activity_markers = ["上午", "下午", "抵达", "离开", "乘", "航班", "访问", "交流"]
+        return (
+            any(marker in text for marker in schedule_markers)
+            or (any(marker in text for marker in weekday_markers) and any(marker in text for marker in activity_markers))
+        )
+
+    @staticmethod
+    def _infer_schedule_year(text: str) -> int | None:
+        years = [int(match.group(1)) for match in re.finditer(r"(20\d{2})年", text or "")]
+        if not years:
+            return None
+
+        counts: dict[int, int] = {}
+        for year in years:
+            counts[year] = counts.get(year, 0) + 1
+        return max(counts.items(), key=lambda item: item[1])[0]
+
+    @staticmethod
+    def _normalize_chinese_weekday(text: str) -> str:
+        normalized = (text or "").replace("周", "星期").replace("天", "日")
+        return normalized
+
+    @staticmethod
+    def _expected_chinese_weekday(year: int, month: int, day: int) -> str | None:
+        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        try:
+            return weekdays[date(year, month, day).weekday()]
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _compact_snippet(text: str, limit: int = 80) -> str:
+        snippet = " ".join((text or "").split())
+        if len(snippet) <= limit:
+            return snippet
+        return snippet[:limit] + "..."
 
     @staticmethod
     def _is_core_review_page(text: str) -> bool:
@@ -1562,6 +1706,15 @@ class DeterministicRuleEngine:
             if units:
                 parts.append(f"{label}:" + "、".join(sorted(units)))
         return "；".join(parts) if parts else "未识别"
+
+    @staticmethod
+    def _format_schedule_weekday_mismatches(mismatches: list[dict[str, object]]) -> str:
+        if not mismatches:
+            return "未发现日期星期不一致"
+        return "；".join(
+            f"{item.get('date')}标注为{item.get('actual_weekday')}，实际为{item.get('expected_weekday')}"
+            for item in mismatches[:5]
+        )
 
     @staticmethod
     def _is_invitation_page(text: str) -> bool:
