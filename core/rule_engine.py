@@ -79,7 +79,7 @@ class DeterministicRuleEngine:
         )
         transport_refs = self._find_transport_references(page_texts)
         schedule_weekday_mismatches = self._find_schedule_weekday_mismatches(page_texts)
-        duration_values = self._extract_duration_values(page_texts, presentment)
+        duration_values = self._extract_duration_values(page_texts, presentment, budget)
         invite_units = self._extract_invite_units(page_texts, presentment)
         dispatch_source = self._detect_dispatch_source(full_text)
         dispatch_material = self._detect_dispatch_material(page_texts)
@@ -950,10 +950,13 @@ class DeterministicRuleEngine:
         self,
         page_texts: list[tuple[int, str]],
         presentment: PresentmentFacts | None = None,
+        budget: BudgetFacts | None = None,
     ) -> dict[str, tuple[int, int]]:
         values: dict[str, tuple[int, int]] = {}
         if presentment and presentment.duration_days is not None:
             values["呈报表"] = (presentment.page_no or 0, presentment.duration_days)
+        if budget and budget.duration_days is not None:
+            values["预算审批意见表"] = (budget.page_no or 0, budget.duration_days)
 
         patterns = [
             ("呈报表", [r"停留时间\s*(\d+)\s*天"]),
