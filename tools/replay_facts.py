@@ -94,6 +94,14 @@ def facts_to_dict(facts: DocumentFacts) -> dict[str, Any]:
             for page_no, text in facts.transport_refs
         ],
         "personnel_names": facts.personnel_names,
+        "personnel_birth_dates": {
+            name: {"page_no": value[0], "birth_date": value[1]}
+            for name, value in facts.personnel_birth_dates.items()
+        },
+        "invitation_birth_dates": {
+            name: {"page_no": value[0], "birth_date": value[1]}
+            for name, value in facts.invitation_birth_dates.items()
+        },
         "duration_values": {
             label: {"page_no": value[0], "duration_days": value[1]}
             for label, value in facts.duration_values.items()

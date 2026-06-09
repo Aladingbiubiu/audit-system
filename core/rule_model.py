@@ -71,6 +71,8 @@ class DocumentFacts:
     group_unit_name: str | None = None
     has_personnel_list: bool = False
     personnel_names: dict[str, int] = field(default_factory=dict)
+    personnel_birth_dates: dict[str, tuple[int, str]] = field(default_factory=dict)
+    invitation_birth_dates: dict[str, tuple[int, str]] = field(default_factory=dict)
     has_public_notice: bool = False
     has_translation_info: bool = False
     transport_refs: list[tuple[int, str]] = field(default_factory=list)
@@ -146,6 +148,7 @@ class PolicySelector:
         "text.banned_words",
         "duration.cross_material_consistency",
         "personnel.cross_material_consistency",
+        "personnel.birth_date_consistency",
         "invite_unit.chinese_name_consistency",
         "schedule.weekday_consistency",
     )

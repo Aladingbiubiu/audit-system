@@ -71,6 +71,8 @@ class DeterministicRuleEngine:
 
         has_personnel_list = self._has_personnel_list(full_text)
         personnel_names = self._extract_personnel_names(page_texts)
+        personnel_birth_dates = self._extract_personnel_birth_dates(page_texts)
+        invitation_birth_dates = self._extract_invitation_birth_dates(page_texts)
         has_public_notice = self._has_public_notice(pre_invitation_text)
         has_translation_info = (
             any(
@@ -124,6 +126,8 @@ class DeterministicRuleEngine:
             group_unit_name=group_unit_name,
             has_personnel_list=has_personnel_list,
             personnel_names=personnel_names,
+            personnel_birth_dates=personnel_birth_dates,
+            invitation_birth_dates=invitation_birth_dates,
             has_public_notice=has_public_notice,
             has_translation_info=has_translation_info,
             transport_refs=transport_refs,
@@ -148,6 +152,8 @@ class DeterministicRuleEngine:
             "已识别人员名单": "是" if facts.has_personnel_list else "否",
             "人员名单姓名": "、".join(sorted(facts.personnel_names)) if facts.personnel_names else "未识别",
             "呈报表明确出访人员": "、".join(sorted(facts.presentment.traveler_names)) if facts.presentment.traveler_names else "未识别",
+            "人员名单出生日期": self._format_named_date_facts(facts.personnel_birth_dates),
+            "邀请函受邀人员出生日期": self._format_named_date_facts(facts.invitation_birth_dates),
             "已识别公示情况": "是" if facts.has_public_notice else "否",
             "已识别翻译情况": "是" if facts.has_translation_info else "否",
             "已识别交通班次信息": "是" if facts.transport_refs else "否",
@@ -239,6 +245,20 @@ class DeterministicRuleEngine:
                 lambda facts: self._find_personnel_consistency_issues(
                     facts.presentment,
                     facts.personnel_names,
+                ),
+            ),
+            Rule(
+                RuleMetadata(
+                    id="personnel.birth_date_consistency",
+                    name="跨材料人员出生日期一致性",
+                    layer="consistency",
+                    severity="严重",
+                    applies_to=all_group_types,
+                    requires_facts=("personnel_birth_dates", "invitation_birth_dates"),
+                ),
+                lambda facts: self._find_birth_date_consistency_issues(
+                    facts.personnel_birth_dates,
+                    facts.invitation_birth_dates,
                 ),
             ),
             Rule(
@@ -812,14 +832,70 @@ class DeterministicRuleEngine:
     def _extract_personnel_names(page_texts: list[tuple[int, str]]) -> dict[str, int]:
         names: dict[str, int] = {}
         for page_no, text in page_texts:
-            if "团组人员名单" not in text and "人员名单" not in text:
+            compact_text = re.sub(r"\s+", "", text)
+            if "团组人员名单" not in compact_text and "人员名单" not in compact_text:
                 continue
             for line in text.splitlines():
                 compact = re.sub(r"\s+", "", line)
-                match = re.fullmatch(r"(?:\d{1,2})?([\u4e00-\u9fff]{2,4})[男女]", compact)
+                match = re.match(r"(?:\d{1,2})?([\u4e00-\u9fff]{2,4})[男女]", compact)
                 if match:
                     names.setdefault(match.group(1), page_no)
         return names
+
+    @staticmethod
+    def _extract_personnel_birth_dates(page_texts: list[tuple[int, str]]) -> dict[str, tuple[int, str]]:
+        dates: dict[str, tuple[int, str]] = {}
+        for page_no, text in page_texts:
+            compact_text = re.sub(r"\s+", "", text)
+            if "团组人员名单" not in compact_text and "人员名单" not in compact_text:
+                continue
+            for line in text.splitlines():
+                compact = re.sub(r"\s+", "", line)
+                match = re.match(
+                    r"(?:\d{1,2})?([\u4e00-\u9fff]{2,4})[男女](\d{17}[\dXx])",
+                    compact,
+                )
+                if not match:
+                    continue
+                identity_number = match.group(2)
+                birth = identity_number[6:14]
+                if DeterministicRuleEngine._is_valid_yyyymmdd(birth):
+                    dates.setdefault(match.group(1), (page_no, DeterministicRuleEngine._format_yyyymmdd(birth)))
+        return dates
+
+    def _extract_invitation_birth_dates(
+        self,
+        page_texts: list[tuple[int, str]],
+    ) -> dict[str, tuple[int, str]]:
+        dates: dict[str, tuple[int, str]] = {}
+        for page_no, text in page_texts:
+            compact_text = re.sub(r"\s+", "", text)
+            if "邀请函" not in compact_text or "受邀人员名单" not in compact_text:
+                continue
+            for line in text.splitlines():
+                compact = re.sub(r"\s+", "", line)
+                match = re.match(
+                    r"(?:\d{1,2}[.、]?)?([\u4e00-\u9fff]{2,4})[男女][^\d\n]{0,20}"
+                    r"((?:19|20)\d{2})[./年-](\d{1,2})[./月-](\d{1,2})日?",
+                    compact,
+                )
+                if not match:
+                    continue
+                birth = f"{int(match.group(2)):04d}-{int(match.group(3)):02d}-{int(match.group(4)):02d}"
+                dates.setdefault(match.group(1), (page_no, birth))
+        return dates
+
+    @staticmethod
+    def _is_valid_yyyymmdd(value: str) -> bool:
+        try:
+            date(int(value[:4]), int(value[4:6]), int(value[6:8]))
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _format_yyyymmdd(value: str) -> str:
+        return f"{value[:4]}-{value[4:6]}-{value[6:8]}"
 
     @staticmethod
     def _extract_presentment_traveler_names(text: str) -> set[str]:
@@ -1095,6 +1171,32 @@ class DeterministicRuleEngine:
                 "、".join(dict.fromkeys(locations)),
             )
         ]
+
+    @staticmethod
+    def _find_birth_date_consistency_issues(
+        personnel_birth_dates: dict[str, tuple[int, str]],
+        invitation_birth_dates: dict[str, tuple[int, str]],
+    ) -> list[AuditIssue]:
+        issues: list[AuditIssue] = []
+        for name in sorted(set(personnel_birth_dates) & set(invitation_birth_dates)):
+            personnel_page, personnel_date = personnel_birth_dates[name]
+            invitation_page, invitation_date = invitation_birth_dates[name]
+            if personnel_date == invitation_date:
+                continue
+            description = (
+                f"{name}的出生日期跨材料不一致："
+                f"团组人员名单身份证号码对应{personnel_date}；"
+                f"邀请函受邀人员名单填写{invitation_date}"
+            )
+            issues.append(
+                AuditIssue(
+                    "严重",
+                    "跨材料一致性校验",
+                    description,
+                    f"第{personnel_page}页、第{invitation_page}页",
+                )
+            )
+        return issues
 
     def _find_invite_unit_consistency_issues(self, invite_units: dict[str, tuple[int, set[str]]]) -> list[AuditIssue]:
         if "呈报表" not in invite_units:
@@ -1773,6 +1875,12 @@ class DeterministicRuleEngine:
         if not duration_values:
             return "未识别"
         return "；".join(f"{label}{value}天" for label, (_, value) in duration_values.items())
+
+    @staticmethod
+    def _format_named_date_facts(values: dict[str, tuple[int, str]]) -> str:
+        if not values:
+            return "未识别"
+        return "；".join(f"{name}{value}" for name, (_, value) in sorted(values.items()))
 
     @staticmethod
     def _format_invite_unit_facts(invite_units: dict[str, tuple[int, set[str]]]) -> str:
