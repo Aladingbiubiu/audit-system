@@ -76,10 +76,12 @@ def replay_pdf(pdf_path: Path, engine: DeterministicRuleEngine, *, enable_ocr: b
 
 
 def facts_to_dict(facts: DocumentFacts) -> dict[str, Any]:
+    presentment = asdict(facts.presentment)
+    presentment["traveler_names"] = sorted(facts.presentment.traveler_names)
     return {
         "profile": asdict(facts.profile),
         "group_unit_name": facts.group_unit_name,
-        "presentment": asdict(facts.presentment),
+        "presentment": presentment,
         "budget": asdict(facts.budget),
         "flags": {
             "has_personnel_list": facts.has_personnel_list,
@@ -91,6 +93,7 @@ def facts_to_dict(facts: DocumentFacts) -> dict[str, Any]:
             {"page_no": page_no, "text": text}
             for page_no, text in facts.transport_refs
         ],
+        "personnel_names": facts.personnel_names,
         "duration_values": {
             label: {"page_no": value[0], "duration_days": value[1]}
             for label, value in facts.duration_values.items()
@@ -107,4 +110,3 @@ def facts_to_dict(facts: DocumentFacts) -> dict[str, Any]:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

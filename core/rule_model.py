@@ -28,6 +28,7 @@ class PresentmentFacts:
     invite_unit_foreign: str | None = None
     expense_source: str | None = None
     visit_reason: str | None = None
+    traveler_names: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -69,6 +70,7 @@ class DocumentFacts:
     budget: BudgetFacts = field(default_factory=BudgetFacts)
     group_unit_name: str | None = None
     has_personnel_list: bool = False
+    personnel_names: dict[str, int] = field(default_factory=dict)
     has_public_notice: bool = False
     has_translation_info: bool = False
     transport_refs: list[tuple[int, str]] = field(default_factory=list)
@@ -143,6 +145,7 @@ class PolicySelector:
     COMMON_RULE_IDS = (
         "text.banned_words",
         "duration.cross_material_consistency",
+        "personnel.cross_material_consistency",
         "invite_unit.chinese_name_consistency",
         "schedule.weekday_consistency",
     )

@@ -70,6 +70,7 @@ class DeterministicRuleEngine:
         academic_modes = self._detect_academic_modes(full_text)
 
         has_personnel_list = self._has_personnel_list(full_text)
+        personnel_names = self._extract_personnel_names(page_texts)
         has_public_notice = self._has_public_notice(pre_invitation_text)
         has_translation_info = (
             any(
@@ -122,6 +123,7 @@ class DeterministicRuleEngine:
             budget=budget,
             group_unit_name=group_unit_name,
             has_personnel_list=has_personnel_list,
+            personnel_names=personnel_names,
             has_public_notice=has_public_notice,
             has_translation_info=has_translation_info,
             transport_refs=transport_refs,
@@ -144,6 +146,8 @@ class DeterministicRuleEngine:
             "高校科研院所团组": "是" if facts.profile.is_academic else "否",
             "任务类型": "、".join(facts.profile.academic_modes) if facts.profile.academic_modes else "未识别",
             "已识别人员名单": "是" if facts.has_personnel_list else "否",
+            "人员名单姓名": "、".join(sorted(facts.personnel_names)) if facts.personnel_names else "未识别",
+            "呈报表明确出访人员": "、".join(sorted(facts.presentment.traveler_names)) if facts.presentment.traveler_names else "未识别",
             "已识别公示情况": "是" if facts.has_public_notice else "否",
             "已识别翻译情况": "是" if facts.has_translation_info else "否",
             "已识别交通班次信息": "是" if facts.transport_refs else "否",
@@ -222,6 +226,20 @@ class DeterministicRuleEngine:
                     requires_facts=("duration_values",),
                 ),
                 lambda facts: self._find_duration_consistency_issues(facts.duration_values),
+            ),
+            Rule(
+                RuleMetadata(
+                    id="personnel.cross_material_consistency",
+                    name="跨材料人员姓名一致性",
+                    layer="consistency",
+                    severity="严重",
+                    applies_to=all_group_types,
+                    requires_facts=("presentment", "personnel_names"),
+                ),
+                lambda facts: self._find_personnel_consistency_issues(
+                    facts.presentment,
+                    facts.personnel_names,
+                ),
             ),
             Rule(
                 RuleMetadata(
@@ -364,6 +382,7 @@ class DeterministicRuleEngine:
                 invite_unit_foreign=self._extract_invite_unit_foreign_from_presentment(text),
                 expense_source=self._extract_expense_source_from_presentment_text(text),
                 visit_reason=self._extract_presentment_visit_reason(text),
+                traveler_names=self._extract_presentment_traveler_names(text),
             )
         return PresentmentFacts()
 
@@ -790,6 +809,31 @@ class DeterministicRuleEngine:
         return all(field in text for field in required_fields)
 
     @staticmethod
+    def _extract_personnel_names(page_texts: list[tuple[int, str]]) -> dict[str, int]:
+        names: dict[str, int] = {}
+        for page_no, text in page_texts:
+            if "团组人员名单" not in text and "人员名单" not in text:
+                continue
+            for line in text.splitlines():
+                compact = re.sub(r"\s+", "", line)
+                match = re.fullmatch(r"(?:\d{1,2})?([\u4e00-\u9fff]{2,4})[男女]", compact)
+                if match:
+                    names.setdefault(match.group(1), page_no)
+        return names
+
+    @staticmethod
+    def _extract_presentment_traveler_names(text: str) -> set[str]:
+        names: set[str] = set()
+        title_pattern = (
+            r"(?:主任医师|副主任医师|医师|教授|副教授|研究员|副研究员|工程师|同志)"
+            r"([\u4e00-\u9fff]{2,4})(?:等\d+人)?拟于"
+        )
+        boundary_pattern = r"(?:^|[，。；、\s])([\u4e00-\u9fff]{2,4})(?:等\d+人)?拟于"
+        for pattern in [title_pattern, boundary_pattern]:
+            names.update(match.group(1) for match in re.finditer(pattern, text, re.M))
+        return names
+
+    @staticmethod
     def _has_public_notice(text: str) -> bool:
         direct_phrases = [
             "公示无异议",
@@ -1021,6 +1065,36 @@ class DeterministicRuleEngine:
             for page_no, _ in duration_values.values()
         )
         return [AuditIssue("严重", "跨材料一致性校验", description, location)]
+
+    @staticmethod
+    def _find_personnel_consistency_issues(
+        presentment: PresentmentFacts,
+        personnel_names: dict[str, int],
+    ) -> list[AuditIssue]:
+        if not presentment.traveler_names or not personnel_names:
+            return []
+
+        missing_names = sorted(presentment.traveler_names - set(personnel_names))
+        if not missing_names:
+            return []
+
+        list_names = "、".join(sorted(personnel_names))
+        description = (
+            "呈报表明确写明的出访人员与团组人员名单不一致："
+            f"呈报表出现{'、'.join(missing_names)}；人员名单仅识别到{list_names}"
+        )
+        locations = []
+        if presentment.page_no:
+            locations.append(f"第{presentment.page_no}页")
+        locations.extend(f"第{page_no}页" for page_no in sorted(set(personnel_names.values())))
+        return [
+            AuditIssue(
+                "严重",
+                "跨材料一致性校验",
+                description,
+                "、".join(dict.fromkeys(locations)),
+            )
+        ]
 
     def _find_invite_unit_consistency_issues(self, invite_units: dict[str, tuple[int, set[str]]]) -> list[AuditIssue]:
         if "呈报表" not in invite_units:
