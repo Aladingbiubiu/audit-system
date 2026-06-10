@@ -37,7 +37,10 @@
   - 独立数据库 `data/history.db`
   - 每个 PDF 按一次出访任务建库，支持递归批量导入、重复标记、档案筛选、人工修正和按国家推荐
   - 仅通过适配器复用 `core/pdf_parser.py` 和 `DeterministicRuleEngine.extract_facts()`，不接入 `workflow.py`，不影响现有审核流程
-- 已接入 OCR，扫描页可识别
+- 已接入 OCR，扫描页可识别：
+  - RapidOCR 作为基础识别
+  - PaddleOCR PP-OCRv5 mobile 作为扫描页批量二次增强，独立运行于 `.paddle-ocr-venv`
+  - PaddleOCR 不可用或失败时自动回退 RapidOCR；可通过 `PADDLE_OCR_ENABLED=0` 临时关闭
 - 已支持程序判断：
   - 禁用词
   - 企业团组识别
@@ -48,6 +51,7 @@
   - 交通班次存在性识别
   - 邀请单位中文名称初步比对
   - 邀请函中文邀请单位高置信句式抽取、噪声截断和核心名称归一化
+  - 邀请单位候选值过滤已覆盖混合括号“（中外文)”及“我们非常荣幸地邀请”等非单位语义
   - 跨材料停留天数一致性校验
 - 已新增 `core/rule_model.py`：
   - `DocumentFacts`：材料事实层

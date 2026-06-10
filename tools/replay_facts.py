@@ -63,6 +63,7 @@ def replay_pdf(pdf_path: Path, engine: DeterministicRuleEngine, *, enable_ocr: b
                 "text_page_count": extraction.text_page_count,
                 "image_only_pages": extraction.image_only_pages,
                 "ocr_pages": extraction.ocr_pages,
+                "paddle_ocr_pages": extraction.paddle_ocr_pages,
                 "unreadable_pages": extraction.unreadable_pages,
             },
             "facts": facts_to_dict(facts),

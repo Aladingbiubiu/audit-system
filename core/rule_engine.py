@@ -523,18 +523,19 @@ class DeterministicRuleEngine:
             "出访国别",
             stop_markers=["出访时间", "审核内容", "是否列入出国计划"],
         )
-        if value and value not in ["（地区）（含经停）", "(地区)(含经停)"]:
-            return value
+        cleaned_value = self._clean_budget_country_value(value or "")
+        if cleaned_value:
+            return cleaned_value
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         for index, line in enumerate(lines):
             if "出访国别" not in line:
                 continue
-            for candidate in lines[index + 1:index + 5]:
+            for candidate in reversed(lines[max(0, index - 3):index]):
                 cleaned = self._clean_budget_country_value(candidate)
                 if cleaned:
                     return cleaned
-            for candidate in reversed(lines[max(0, index - 3):index]):
+            for candidate in lines[index + 1:index + 5]:
                 cleaned = self._clean_budget_country_value(candidate)
                 if cleaned:
                     return cleaned
@@ -545,6 +546,9 @@ class DeterministicRuleEngine:
         cleaned = DeterministicRuleEngine._clean_budget_field_value(text)
         if not cleaned:
             return None
+        compact = re.sub(r"\s+", "", cleaned)
+        if re.search(r"\d{1,4}年|\d{1,2}月|\d{1,2}日|至|天", compact):
+            return None
         if not DeterministicRuleEngine._has_chinese_text(cleaned):
             return None
         invalid_markers = [
@@ -554,6 +558,8 @@ class DeterministicRuleEngine:
             "单位",
             "团组",
             "出访时间",
+            "地区",
+            "含经停",
             "姓名",
             "职务",
             "是否",
@@ -901,7 +907,8 @@ class DeterministicRuleEngine:
     def _extract_presentment_traveler_names(text: str) -> set[str]:
         names: set[str] = set()
         title_pattern = (
-            r"(?:主任医师|副主任医师|医师|教授|副教授|研究员|副研究员|工程师|同志)"
+            r"(?:主任医师|副主任医师|医师|教授|副教授|研究员|副研究员|工程师|"
+            r"院长|副院长|校长|副校长|主任|副主任|处长|副处长|同志)"
             r"([\u4e00-\u9fff]{2,4})(?:等\d+人)?拟于"
         )
         boundary_pattern = r"(?:^|[，。；、\s])([\u4e00-\u9fff]{2,4})(?:等\d+人)?拟于"
@@ -1620,8 +1627,6 @@ class DeterministicRuleEngine:
             text,
             "邀请单位",
             stop_markers=[
-                "(中外文)",
-                "（中外文）",
                 "费用来源",
                 "开支项目",
                 "出访地",
@@ -1722,6 +1727,9 @@ class DeterministicRuleEngine:
         cleaned = (text or "").strip(" ：:，,。；;、 \t\r\n《》“”\"'")
         if not cleaned:
             return None
+        cleaned = re.sub(r"[（(][^（）()]*[A-Za-z][^（）()]*[）)]", "", cleaned).strip(
+            " ：:，,。；;、 \t\r\n《》“”\"'"
+        )
         if DeterministicRuleEngine._is_noise_invite_unit_value(cleaned):
             return None
         if not DeterministicRuleEngine._has_chinese_text(cleaned):
@@ -1737,14 +1745,24 @@ class DeterministicRuleEngine:
         stripped = (text or "").strip()
         if not stripped:
             return True
+        normalized = stripped.replace("（", "(").replace("）", ")").replace(" ", "")
         noise_values = {
             "邀请单位",
             "(中外文)",
-            "（中外文）",
             "中外文",
             "全称",
         }
-        if stripped in noise_values:
+        if normalized in noise_values:
+            return True
+        semantic_noise = [
+            "我们非常荣幸",
+            "我方非常荣幸",
+            "我们诚挚",
+            "我方诚挚",
+            "在此我们",
+            "特此",
+        ]
+        if any(normalized.startswith(marker) for marker in semantic_noise):
             return True
         if re.fullmatch(r"[A-Za-z0-9\s,，.()（）&\-]+", stripped):
             return True
@@ -1798,6 +1816,7 @@ class DeterministicRuleEngine:
             r"^.*?联邦国家预算高等教育机构[“”\"]?",
             r"^.*?国家预算高等教育机构[“”\"]?",
             r"^.*?高等教育机构[“”\"]?",
+            r"^教育机构[《“”\"]?",
             r"^.*?应",
             r"^.*?受",
         ]
@@ -1812,10 +1831,12 @@ class DeterministicRuleEngine:
         remove_tokens = [
             "中国",
             "中华人民共和国",
+            "白俄罗斯",
             "俄罗斯联邦",
             "联邦国家预算高等教育机构",
             "国家预算高等教育机构",
             "高等教育机构",
+            "教育机构",
             "（",
             "）",
             "(",

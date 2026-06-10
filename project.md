@@ -7,7 +7,7 @@
   - 前端：`Streamlit`
   - 数据：`SQLite + SQLAlchemy`
   - PDF 解析：`pdfplumber`
-  - OCR：`PyMuPDF + rapidocr-onnxruntime`
+  - OCR：`PyMuPDF + rapidocr-onnxruntime + PaddleOCR PP-OCRv5 mobile（二次增强，可自动回退）`
   - 大模型审核：智谱 / Claude
 - 启动方式：
   - `python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501`
@@ -34,6 +34,8 @@
 ### 1. OCR
 
 - 扫描页会自动 OCR。
+- 默认先运行 RapidOCR；如已安装项目隔离环境 `.paddle-ocr-venv`，会将同一 PDF 的扫描页批量交给 PaddleOCR 二次识别，并按文本完整度选择结果。
+- PaddleOCR 使用独立 Python 3.12 环境，不影响主程序 Python；不可用或失败时自动回退 RapidOCR。
 - 已能识别扫描型呈报表、人员名单等内容。
 
 ### 2. 规则引擎优先

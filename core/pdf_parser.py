@@ -1,8 +1,15 @@
 import pdfplumber
+import json
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass
 
 _OCR_ENGINE = None
+ROOT = Path(__file__).resolve().parents[1]
+PADDLE_PYTHON = ROOT / ".paddle-ocr-venv" / "Scripts" / "python.exe"
+PADDLE_WORKER = ROOT / "tools" / "paddle_ocr_worker.py"
 
 
 @dataclass
@@ -22,6 +29,7 @@ class PDFTextExtraction:
     text_page_count: int
     image_only_pages: list[int]
     ocr_pages: list[int]
+    paddle_ocr_pages: list[int]
     unreadable_pages: list[int]
     page_texts: list[tuple[int, str]]
 
@@ -35,6 +43,9 @@ class PDFTextExtraction:
         if self.ocr_pages:
             pages = "、".join(str(page) for page in self.ocr_pages)
             messages.append(f"注意：第 {pages} 页为扫描图片页，系统已通过 OCR 识别其文字。")
+        if self.paddle_ocr_pages:
+            pages = "、".join(str(page) for page in self.paddle_ocr_pages)
+            messages.append(f"其中第 {pages} 页已使用 PaddleOCR 进行增强识别。")
 
         if self.unreadable_pages:
             pages = "、".join(str(page) for page in self.unreadable_pages)
@@ -92,6 +103,69 @@ def _ocr_page(pdf_path: Path, page_index: int) -> str:
     return "\n".join(lines)
 
 
+def _render_page_image(pdf_path: Path, page_index: int, output_path: Path) -> None:
+    import fitz
+
+    with fitz.open(pdf_path) as doc:
+        page = doc.load_page(page_index)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        pix.save(output_path)
+
+
+def _paddle_ocr_pages(pdf_path: Path, page_numbers: list[int]) -> dict[int, str]:
+    if (
+        os.environ.get("PADDLE_OCR_ENABLED", "1").lower() in {"0", "false", "no"}
+        or not page_numbers
+        or not PADDLE_PYTHON.exists()
+        or not PADDLE_WORKER.exists()
+    ):
+        return {}
+
+    with tempfile.TemporaryDirectory(prefix="audit-paddle-ocr-") as temp_dir:
+        temp_path = Path(temp_dir)
+        images = []
+        for page_no in page_numbers:
+            image_path = temp_path / f"page-{page_no}.png"
+            _render_page_image(pdf_path, page_no - 1, image_path)
+            images.append(image_path)
+
+        env = os.environ.copy()
+        env.setdefault("FLAGS_use_mkldnn", "0")
+        env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        try:
+            completed = subprocess.run(
+                [str(PADDLE_PYTHON), str(PADDLE_WORKER), *(str(path) for path in images)],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                timeout=360,
+                check=True,
+            )
+            payload = json.loads(completed.stdout.strip().splitlines()[-1].decode("utf-8"))
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, IndexError):
+            return {}
+
+        if not payload.get("ok"):
+            return {}
+        return {
+            page_no: str(item.get("text") or "").strip()
+            for page_no, item in zip(page_numbers, payload.get("pages") or [])
+            if str(item.get("text") or "").strip()
+        }
+
+
+def _ocr_text_quality(text: str) -> float:
+    compact = "".join((text or "").split())
+    if not compact:
+        return 0.0
+    marker_bonus = sum(
+        40
+        for marker in ["呈报表", "人员名单", "邀请单位", "预算审批意见表", "身份证号码", "出访时间"]
+        if marker in compact
+    )
+    return len(compact) + marker_bonus
+
+
 def extract_text_with_diagnostics(pdf_path: str | Path, enable_ocr: bool = True) -> PDFTextExtraction:
     """提取PDF文本，并标记无法直接读取文字的扫描页。"""
     path = Path(pdf_path)
@@ -101,30 +175,51 @@ def extract_text_with_diagnostics(pdf_path: str | Path, enable_ocr: bool = True)
     text_parts = []
     image_only_pages = []
     ocr_pages = []
+    paddle_ocr_pages = []
     unreadable_pages = []
+    direct_texts: dict[int, str] = {}
+    rapid_texts: dict[int, str] = {}
     with pdfplumber.open(path) as pdf:
         for i, page in enumerate(pdf.pages, 1):
             page_text, is_image_only = _analyze_page(page)
             if page_text:
-                text_parts.append(f"--- 第 {i} 页 ---\n{page_text}")
+                direct_texts[i] = page_text
             if is_image_only:
                 image_only_pages.append(i)
                 if enable_ocr:
                     ocr_text = _ocr_page(path, i - 1)
                     if ocr_text:
-                        text_parts.append(f"--- 第 {i} 页（OCR识别）---\n{ocr_text}")
-                        ocr_pages.append(i)
+                        rapid_texts[i] = ocr_text
                     else:
                         unreadable_pages.append(i)
                 else:
                     unreadable_pages.append(i)
 
+        paddle_texts = _paddle_ocr_pages(path, image_only_pages) if enable_ocr else {}
+        for page_no in image_only_pages:
+            rapid_text = rapid_texts.get(page_no, "")
+            paddle_text = paddle_texts.get(page_no, "")
+            if paddle_text and _ocr_text_quality(paddle_text) >= _ocr_text_quality(rapid_text) * 0.85:
+                rapid_texts[page_no] = paddle_text
+                paddle_ocr_pages.append(page_no)
+            if rapid_texts.get(page_no):
+                ocr_pages.append(page_no)
+                if page_no in unreadable_pages:
+                    unreadable_pages.remove(page_no)
+
+        for page_no in range(1, len(pdf.pages) + 1):
+            if page_no in direct_texts:
+                text_parts.append(f"--- 第 {page_no} 页 ---\n{direct_texts[page_no]}")
+            elif page_no in rapid_texts:
+                text_parts.append(f"--- 第 {page_no} 页（OCR识别）---\n{rapid_texts[page_no]}")
+
         return PDFTextExtraction(
             text="\n\n".join(text_parts),
             page_count=len(pdf.pages),
-            text_page_count=len(text_parts),
+            text_page_count=len(direct_texts),
             image_only_pages=image_only_pages,
             ocr_pages=ocr_pages,
+            paddle_ocr_pages=paddle_ocr_pages,
             unreadable_pages=unreadable_pages,
             page_texts=_build_page_texts(text_parts)
         )

@@ -14,6 +14,20 @@ python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 
 `http://127.0.0.1:8501`
 
+## PaddleOCR 增强识别
+
+系统默认使用 RapidOCR，并在项目内存在 `.paddle-ocr-venv` 时，对扫描页批量调用
+PaddleOCR PP-OCRv5 mobile 模型进行二次识别，再自动选择文本更完整的结果。
+
+首次安装：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/setup_paddle_ocr.ps1
+```
+
+首次识别会下载本地模型。PaddleOCR 不可用或识别失败时会自动回退 RapidOCR。
+如需临时关闭增强识别，可设置环境变量 `PADDLE_OCR_ENABLED=0`。
+
 ## 历史出访知识库
 
 历史出访知识库是仓库内的独立模块，不接入自动审核流程，使用独立数据库 `data/history.db`。
